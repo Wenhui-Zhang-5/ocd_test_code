@@ -23,7 +23,7 @@ import {
 import { SPECTRUM_API_BASE } from "../../config/env.js";
 import { isWorkspaceReadOnly } from "../../data/workspaceAccess.js";
 const DEFAULT_POINT_IDS = Array.from({ length: 17 }).map(
-  (_, index) => `Point_${String(index + 1).padStart(4, "0")}`
+  (_, index) => `point_${index + 1}`
 );
 
 const formatDateTimeLocal = (date) => {
@@ -97,7 +97,7 @@ const buildPointPlotTraces = (pointCurves, mode) => {
   const pointLegendShown = new Set();
   let pointCounter = 0;
   (pointCurves || []).forEach((curve, rowIndex) => {
-    const pointId = curve.point_id || curve.pointId || `Point_${String(rowIndex + 1).padStart(4, "0")}`;
+    const pointId = curve.point_id || curve.pointId || `point_${rowIndex + 1}`;
     const pointLabel = formatPointLabel(pointId);
     const repeatId = curve.repeat_id || curve.repeatId || "Repeat_0001";
     if (pointOrder[pointId] === undefined) {
@@ -142,7 +142,7 @@ const buildPointPlotTraces = (pointCurves, mode) => {
 const normalizePointPlotPayload = (payload) => {
   if (Array.isArray(payload?.points)) {
     return payload.points.map((item, index) => ({
-      point_id: item.point_id || item.pointId || `Point_${String(index + 1).padStart(4, "0")}`,
+      point_id: item.point_id || item.pointId || `point_${index + 1}`,
       repeat_id: item.repeat_id || item.repeatId || "Repeat_0001",
       se_filename: item.se_filename || "",
       sr_filename: item.sr_filename || "",
@@ -410,15 +410,6 @@ export default function Precision({ workspaceId }) {
   const handleImport = async () => {
     if (selectedRows.length === 0) return;
     const chosen = filteredObjects.filter((row) => selectedRows.includes(row._rowKey));
-    const waferCounts = chosen.reduce((acc, row) => {
-      acc[row.waferId] = (acc[row.waferId] || 0) + 1;
-      return acc;
-    }, {});
-    const duplicateWafers = Object.keys(waferCounts).filter((id) => waferCounts[id] > 1);
-    if (duplicateWafers.length) {
-      setRecordsError(`Each wafer can only be loaded once. Remove duplicates: ${duplicateWafers.join(", ")}`);
-      return;
-    }
     setRecordsError("");
     setRestoreHint("");
     setCalcError("");
@@ -442,7 +433,7 @@ export default function Precision({ workspaceId }) {
         ? selectedPoints
         : pointIdsInStore.length
           ? [pointIdsInStore[0]]
-          : ["Point_0001"];
+          : ["point_1"];
       setSelectedPoints(defaultPoints);
       setPrecisionSelection({
         workspaceId,
@@ -549,8 +540,10 @@ export default function Precision({ workspaceId }) {
     };
   }, [timeStart, timeEnd]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const withSelected = (options, selectedValues) =>
+    Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
+
+  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
     const appendList = (params, key, values) => {
       (values || []).forEach((value) => {
         if (value !== undefined && value !== null && String(value).trim()) {
@@ -558,65 +551,169 @@ export default function Precision({ workspaceId }) {
         }
       });
     };
-    const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
-      const params = new URLSearchParams();
-      if (timeStart) params.set("start", formatCompactDateParam(timeStart));
-      if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
-      params.set("field", field);
-      appendList(params, "tool", tools);
-      appendList(params, "recipe", recipes);
-      appendList(params, "lot", lots);
-      const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`Filter options API failed for field=${field}`);
-      }
-      const data = await response.json();
-      return Array.isArray(data.options) ? data.options : [];
-    };
-    const fetchFilterOptions = async () => {
+    const params = new URLSearchParams();
+    if (timeStart) params.set("start", formatCompactDateParam(timeStart));
+    if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
+    params.set("field", field);
+    appendList(params, "tool", tools);
+    appendList(params, "recipe", recipes);
+    appendList(params, "lot", lots);
+    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error(`Filter options API failed for field=${field}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data.options) ? data.options : [];
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchToolOptions = async () => {
       try {
-        const selectedTools = machineId ? [machineId] : [];
-        const selectedRecipes = recipeName ? [recipeName] : [];
-        const selectedLots = lotId ? [lotId] : [];
         const toolOptions = await fetchFieldOptions({ field: "tool" });
-        const recipeOptions = await fetchFieldOptions({
-          field: "recipe",
-          tools: selectedTools
-        });
-        const lotOptions = await fetchFieldOptions({
-          field: "lot",
-          tools: selectedTools,
-          recipes: selectedRecipes
-        });
-        const waferOptions = await fetchFieldOptions({
-          field: "wafer",
-          tools: selectedTools,
-          recipes: selectedRecipes,
-          lots: selectedLots
-        });
         if (cancelled) return;
-        const withSelected = (options, selectedValues) =>
-          Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
-        setFilterOptions({
-          toolOptions: withSelected(Array.isArray(toolOptions) ? toolOptions : [], [machineId]),
-          recipeOptions: withSelected(Array.isArray(recipeOptions) ? recipeOptions : [], [recipeName]),
-          lotOptions: withSelected(Array.isArray(lotOptions) ? lotOptions : [], [lotId]),
-          waferOptions: withSelected(
-            Array.isArray(waferOptions) ? waferOptions : [],
-            Array.isArray(selectedWafers) ? selectedWafers : []
-          )
-        });
+        setFilterOptions((prev) => ({
+          ...prev,
+          toolOptions: withSelected(toolOptions, [machineId]),
+          recipeOptions: [],
+          lotOptions: [],
+          waferOptions: []
+        }));
       } catch (_error) {
         if (cancelled) return;
-        setFilterOptions({
+        setFilterOptions((prev) => ({
+          ...prev,
           toolOptions: [],
           recipeOptions: [],
           lotOptions: [],
           waferOptions: []
-        });
+        }));
       }
     };
-    fetchFilterOptions();
+    fetchToolOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        recipeOptions: [],
+        lotOptions: [],
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchRecipeOptions = async () => {
+      try {
+        const recipeOptions = await fetchFieldOptions({
+          field: "recipe",
+          tools: [machineId]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          recipeOptions: withSelected(recipeOptions, [recipeName]),
+          lotOptions: [],
+          waferOptions: []
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          recipeOptions: [],
+          lotOptions: [],
+          waferOptions: []
+        }));
+      }
+    };
+    fetchRecipeOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd, machineId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId || !recipeName) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        lotOptions: [],
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchLotOptions = async () => {
+      try {
+        const lotOptions = await fetchFieldOptions({
+          field: "lot",
+          tools: [machineId],
+          recipes: [recipeName]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          lotOptions: withSelected(lotOptions, [lotId]),
+          waferOptions: []
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          lotOptions: [],
+          waferOptions: []
+        }));
+      }
+    };
+    fetchLotOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd, machineId, recipeName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId || !recipeName || !lotId) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchWaferOptions = async () => {
+      try {
+        const waferOptions = await fetchFieldOptions({
+          field: "wafer",
+          tools: [machineId],
+          recipes: [recipeName],
+          lots: [lotId]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          waferOptions: withSelected(
+            waferOptions,
+            Array.isArray(selectedWafers) ? selectedWafers : []
+          )
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          waferOptions: []
+        }));
+      }
+    };
+    fetchWaferOptions();
     return () => {
       cancelled = true;
     };
@@ -677,8 +774,8 @@ export default function Precision({ workspaceId }) {
     if (fromCurves.length > 1) {
       return fromCurves.map((value) => ({ value, label: formatPointLabel(value) }));
     }
-    // Precision load may lazily initialize only Point_0001; keep full selectable catalog.
-    if (fromCurves.length === 1 && fromCurves[0] === "Point_0001") {
+    // Precision load may lazily initialize only point_1; keep full selectable catalog.
+    if (fromCurves.length === 1 && String(fromCurves[0]).toLowerCase() === "point_1") {
       return DEFAULT_POINT_IDS.map((value) => ({ value, label: formatPointLabel(value) }));
     }
     const fromSummary = Array.from(new Set((summaryRows || []).map((row) => row.point).filter(Boolean)));
@@ -1190,6 +1287,11 @@ export default function Precision({ workspaceId }) {
   };
 
   const handleNextStep = () => {
+    if (workspaceId && workspaceId !== "temp") {
+      handleSaveStep();
+      window.location.hash = buildHashHref(`/ocd/workspace/${workspaceId}/pre-recipe/recipe-setup`);
+      return;
+    }
     setShowRecipePrompt(true);
     setModelIdError("");
     if (workspaceId && workspaceId !== "temp") {
@@ -1221,9 +1323,12 @@ export default function Precision({ workspaceId }) {
           );
           return;
         }
+        const spectrumSelectionForRecipeName = getSpectrumSelection(workspaceId);
+        const recipeNameForWorkspace =
+          spectrumSelectionForRecipeName?.recipeName || recipeName || "New Recipe";
         const workspace = createModelWorkspace({
           modelID: finalModelId,
-          recipeName: recipeName || "New Recipe",
+          recipeName: recipeNameForWorkspace,
           owner: "You",
           project: "",
           productID: "",

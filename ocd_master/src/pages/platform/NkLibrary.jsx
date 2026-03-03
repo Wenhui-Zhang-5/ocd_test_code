@@ -346,7 +346,7 @@ export default function NkLibrary() {
             </div>
             {nkCurve.meta.modelType === "Cauchy" ? (
               <div className="kv-grid">
-                {["A", "B", "C", "D", "E", "F"].map((key) => (
+                {["A", "B", "C", "D", "F", "G"].map((key) => (
                   <div key={key} className="kv-row">
                     <span className="kv-label">{key}</span>
                     <span className="kv-value">

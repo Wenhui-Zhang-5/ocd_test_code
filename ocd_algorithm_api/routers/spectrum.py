@@ -813,7 +813,6 @@ def list_spectrum_filter_options(
 
 
 @router.post("/spectrum/get_spectra", response_model=Dict[str, Dict[str, SpectrumFilePayload]])
-@router.post("/spectrum/load", response_model=Dict[str, Dict[str, SpectrumFilePayload]])
 def load_spectrum_payload(payload: SpectrumLoadRequest):
     # Dev-only throttle to make frontend cache-hit/miss behavior visible in testing.
     if FAKE_LOAD_DELAY_SECONDS > 0:

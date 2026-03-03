@@ -135,7 +135,7 @@ export default function RecipeSetup({ workspaceId }) {
         project: schema.project || prev.project,
         productID: schema.productID || prev.productID,
         loop: schema.loop || prev.loop,
-        recipeName: schema.recipeName || prev.recipeName,
+        recipeName: spectrumSelection?.recipeName || schema.recipeName || prev.recipeName,
         layout: schema.layout || prev.layout,
         state: schema.state || prev.state,
         version: schema.version || prev.version
@@ -182,7 +182,7 @@ export default function RecipeSetup({ workspaceId }) {
     } else if (workspaceId !== "temp") {
       setForm((prev) => ({ ...prev, modelID: workspaceId }));
     }
-  }, [workspaceId, availableWafers, precisionAvailableWafers]);
+  }, [workspaceId, availableWafers, precisionAvailableWafers, spectrumSelection?.recipeName]);
 
   useEffect(() => {
     if (restoringRef.current) return;
@@ -606,7 +606,12 @@ export default function RecipeSetup({ workspaceId }) {
         <div className="form-grid two-col">
           <div className="form-row">
             <label>Model ID</label>
-            <input type="text" value={form.modelID} onChange={handleChange("modelID")} />
+            <input
+              type="text"
+              value={form.modelID}
+              onChange={handleChange("modelID")}
+              disabled={Boolean(workspaceId && workspaceId !== "temp") || readOnly}
+            />
           </div>
           <div className="form-row">
             <label>Recipe Name</label>
@@ -721,7 +726,12 @@ export default function RecipeSetup({ workspaceId }) {
           </div>
           <div className="form-row">
             <label>Version</label>
-            <input type="text" value={form.version} onChange={handleChange("version")} />
+            <input
+              type="text"
+              value={form.version}
+              onChange={handleChange("version")}
+              disabled={Boolean(workspaceId && workspaceId !== "temp") || readOnly}
+            />
           </div>
         </div>
         {metaNotice ? <p className="panel-note">{metaNotice}</p> : null}

@@ -4,7 +4,7 @@ import { fetchNkMaterialOrder, loadRecipeSchema, saveRecipeSchema } from "../../
 import { isWorkspaceReadOnly } from "../../data/workspaceAccess.js";
 
 const hoColumns = ["Amp", "En", "Eg", "Phi", "Nu"];
-const cauchyColumns = ["A", "B", "C", "E", "F", "G"];
+const cauchyColumns = ["A", "B", "C", "D", "F", "G"];
 const normalizeMaterial = (name) => (name ? name.split("_")[0] : "");
 
 const buildStepPreview = (mode, rows, columns) => {
@@ -59,7 +59,7 @@ const buildOscillatorExecutionSteps = ({ material, mode, customSteps, useCustomS
   }
   const oscillatorNames = Array.from({ length: material.oscillators || 1 }).map((_, index) => {
     const key = index + 1;
-    return material.oscillatorNames?.[key] || `HarmonicsOSC-${key}`;
+    return material.oscillatorNames?.[key] || `HarmonicsOSC_${key}`;
   });
   if (mode === "column") {
     return hoColumns.map((column, index) => ({
@@ -160,17 +160,19 @@ export default function FittingStrategy({ workspaceId }) {
         map[name].cauchy[item.name] = item.value ?? "";
         return;
       }
-      const match = modelName.match(/OSC-(\d+)/i);
+      const match = modelName.match(/OSC[-_](\d+)/i);
       const oscIndex = match ? Number(match[1]) : 1;
       if (!map[name].ho[oscIndex]) map[name].ho[oscIndex] = {};
       map[name].ho[oscIndex][item.name] = item.value ?? "";
-      map[name].oscillatorNames[oscIndex] = modelName || `HarmonicsOSC-${oscIndex}`;
+      map[name].oscillatorNames[oscIndex] = modelName || `HarmonicsOSC_${oscIndex}`;
       if (oscIndex > map[name].oscillators) {
         map[name].oscillators = oscIndex;
       }
     });
 
     let list = Object.values(map);
+    const materialFloatMap = schema?.startingPoint?.materialFloatMap || {};
+    list = list.filter((item) => Boolean(materialFloatMap[item.name]));
     const saved = schema?.fittingStrategy?.materialOrder;
     if (saved && saved.length) {
       const savedMap = saved.reduce((acc, name, idx) => {
@@ -186,7 +188,11 @@ export default function FittingStrategy({ workspaceId }) {
         return aIdx - bIdx;
       });
       setMaterials(list);
-      if (!selectedMaterial && list.length) setSelectedMaterial(list[0]);
+      if (!list.length) {
+        setSelectedMaterial(null);
+      } else if (!selectedMaterial || !list.some((item) => item.name === selectedMaterial.name)) {
+        setSelectedMaterial(list[0]);
+      }
     } else {
       fetchNkMaterialOrder().then((order) => {
         const orderMap = order.reduce((acc, item, idx) => {
@@ -201,7 +207,11 @@ export default function FittingStrategy({ workspaceId }) {
           return aIdx - bIdx;
         });
         setMaterials(sorted);
-        if (!selectedMaterial && sorted.length) setSelectedMaterial(sorted[0]);
+        if (!sorted.length) {
+          setSelectedMaterial(null);
+        } else if (!selectedMaterial || !sorted.some((item) => item.name === selectedMaterial.name)) {
+          setSelectedMaterial(sorted[0]);
+        }
       });
     }
     setMaterialData(map);

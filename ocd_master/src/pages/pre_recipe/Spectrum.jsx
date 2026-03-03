@@ -493,8 +493,10 @@ export default function Spectrum({ workspaceId }) {
     };
   }, [timeStart, timeEnd]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const withSelected = (options, selectedValues) =>
+    Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
+
+  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
     const appendList = (params, key, values) => {
       (values || []).forEach((value) => {
         if (value !== undefined && value !== null && String(value).trim()) {
@@ -502,66 +504,169 @@ export default function Spectrum({ workspaceId }) {
         }
       });
     };
-    const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
-      const params = new URLSearchParams();
-      if (timeStart) params.set("start", formatCompactDateParam(timeStart));
-      if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
-      params.set("field", field);
-      appendList(params, "tool", tools);
-      appendList(params, "recipe", recipes);
-      appendList(params, "lot", lots);
+    const params = new URLSearchParams();
+    if (timeStart) params.set("start", formatCompactDateParam(timeStart));
+    if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
+    params.set("field", field);
+    appendList(params, "tool", tools);
+    appendList(params, "recipe", recipes);
+    appendList(params, "lot", lots);
+    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error(`Filter options API failed for field=${field}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data.options) ? data.options : [];
+  };
 
-      const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(`Filter options API failed for field=${field}`);
-      }
-      const data = await response.json();
-      return Array.isArray(data.options) ? data.options : [];
-    };
-    const fetchFilterOptions = async () => {
+  useEffect(() => {
+    let cancelled = false;
+    const fetchToolOptions = async () => {
       try {
-        const selectedTools = machineId ? [machineId] : [];
-        const selectedRecipes = recipeName ? [recipeName] : [];
-        const selectedLots = lotId ? [lotId] : [];
         const toolOptions = await fetchFieldOptions({ field: "tool" });
-        const recipeOptions = await fetchFieldOptions({
-          field: "recipe",
-          tools: selectedTools
-        });
-        const lotOptions = await fetchFieldOptions({
-          field: "lot",
-          tools: selectedTools,
-          recipes: selectedRecipes
-        });
-        const waferOptions = await fetchFieldOptions({
-          field: "wafer",
-          tools: selectedTools,
-          recipes: selectedRecipes,
-          lots: selectedLots
-        });
         if (cancelled) return;
-        const withSelected = (options, selectedValues) =>
-          Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
-        setFilterOptions({
-          toolOptions: withSelected(Array.isArray(toolOptions) ? toolOptions : [], [machineId]),
-          recipeOptions: withSelected(Array.isArray(recipeOptions) ? recipeOptions : [], [recipeName]),
-          lotOptions: withSelected(Array.isArray(lotOptions) ? lotOptions : [], [lotId]),
-          waferOptions: withSelected(
-            Array.isArray(waferOptions) ? waferOptions : [],
-            Array.isArray(selectedWafers) ? selectedWafers : []
-          )
-        });
+        setFilterOptions((prev) => ({
+          ...prev,
+          toolOptions: withSelected(toolOptions, [machineId]),
+          recipeOptions: [],
+          lotOptions: [],
+          waferOptions: []
+        }));
       } catch (_error) {
         if (cancelled) return;
-        setFilterOptions({
+        setFilterOptions((prev) => ({
+          ...prev,
           toolOptions: [],
           recipeOptions: [],
           lotOptions: [],
           waferOptions: []
-        });
+        }));
       }
     };
-    fetchFilterOptions();
+    fetchToolOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        recipeOptions: [],
+        lotOptions: [],
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchRecipeOptions = async () => {
+      try {
+        const recipeOptions = await fetchFieldOptions({
+          field: "recipe",
+          tools: [machineId]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          recipeOptions: withSelected(recipeOptions, [recipeName]),
+          lotOptions: [],
+          waferOptions: []
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          recipeOptions: [],
+          lotOptions: [],
+          waferOptions: []
+        }));
+      }
+    };
+    fetchRecipeOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd, machineId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId || !recipeName) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        lotOptions: [],
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchLotOptions = async () => {
+      try {
+        const lotOptions = await fetchFieldOptions({
+          field: "lot",
+          tools: [machineId],
+          recipes: [recipeName]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          lotOptions: withSelected(lotOptions, [lotId]),
+          waferOptions: []
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          lotOptions: [],
+          waferOptions: []
+        }));
+      }
+    };
+    fetchLotOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [timeStart, timeEnd, machineId, recipeName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!machineId || !recipeName || !lotId) {
+      setFilterOptions((prev) => ({
+        ...prev,
+        waferOptions: []
+      }));
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fetchWaferOptions = async () => {
+      try {
+        const waferOptions = await fetchFieldOptions({
+          field: "wafer",
+          tools: [machineId],
+          recipes: [recipeName],
+          lots: [lotId]
+        });
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          waferOptions: withSelected(
+            waferOptions,
+            Array.isArray(selectedWafers) ? selectedWafers : []
+          )
+        }));
+      } catch (_error) {
+        if (cancelled) return;
+        setFilterOptions((prev) => ({
+          ...prev,
+          waferOptions: []
+        }));
+      }
+    };
+    fetchWaferOptions();
     return () => {
       cancelled = true;
     };

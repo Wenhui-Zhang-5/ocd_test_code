@@ -73,22 +73,20 @@ def compute_nk(record: dict):
 
 def _compute_cauchy_nk(wavelength_nm: np.ndarray, params: dict):
     # n(λ) = A + B/λ^2 + C/λ^4, λ in nm
-    # k(λ) = E * exp(F * (Eph - G)), Eph = 1239.84193 / λ
+    # k(λ) = D * exp(F * (Eph - G)), Eph = 1239.84193 / λ
     lam = np.asarray(wavelength_nm, dtype=np.float64)
     eph = 1239.84193 / np.clip(lam, 1e-9, None)
 
     A = float(params.get("A", 1.5))
     B = float(params.get("B", 0.0))
     C = float(params.get("C", 0.0))
-    E = float(params.get("E", 0.0))
+    D = float(params.get("D", 0.0))
     F = float(params.get("F", 0.0))
-    # Some existing files use D/E/F, and some use E/F/G.
-    # We treat "G" as the absorption offset; if missing use "D", else 0.
-    G = float(params.get("G", params.get("D", 0.0)))
+    G = float(params.get("G", 0.0))
 
     lam2 = lam * lam
     n = A + (B / lam2) + (C / (lam2 * lam2))
-    k = E * np.exp(F * (eph - G))
+    k = D * np.exp(F * (eph - G))
     n = np.maximum(n, 1e-6)
     k = np.maximum(k, 0.0)
     return np.round(n, 6).tolist(), np.round(k, 6).tolist()

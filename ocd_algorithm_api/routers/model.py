@@ -61,7 +61,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
             [
                 {
                     "material": "Si_HO",
-                    "model": f"HarmonicsOSC-{osc_index}",
+                    "model": f"HarmonicsOSC_{osc_index}",
                     "name": "Amp",
                     "value": round(base_amp, 3),
                     "valueNew": round(base_amp, 3),
@@ -69,7 +69,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
                 },
                 {
                     "material": "Si_HO",
-                    "model": f"HarmonicsOSC-{osc_index}",
+                    "model": f"HarmonicsOSC_{osc_index}",
                     "name": "En",
                     "value": round(base_en, 3),
                     "valueNew": round(base_en, 3),
@@ -77,7 +77,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
                 },
                 {
                     "material": "Si_HO",
-                    "model": f"HarmonicsOSC-{osc_index}",
+                    "model": f"HarmonicsOSC_{osc_index}",
                     "name": "Eg",
                     "value": round(base_eg, 3),
                     "valueNew": round(base_eg, 3),
@@ -85,7 +85,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
                 },
                 {
                     "material": "Si_HO",
-                    "model": f"HarmonicsOSC-{osc_index}",
+                    "model": f"HarmonicsOSC_{osc_index}",
                     "name": "Phi",
                     "value": round(base_phi, 3),
                     "valueNew": round(base_phi, 3),
@@ -93,7 +93,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
                 },
                 {
                     "material": "Si_HO",
-                    "model": f"HarmonicsOSC-{osc_index}",
+                    "model": f"HarmonicsOSC_{osc_index}",
                     "name": "Nu",
                     "value": round(base_nu, 3),
                     "valueNew": round(base_nu, 3),
@@ -130,7 +130,7 @@ def build_materials(rng: random.Random) -> List[Dict]:
             {
                 "material": "SiO2_Cauchy",
                 "model": "Cauchy",
-                "name": "E",
+                "name": "D",
                 "value": 0.0,
                 "valueNew": 0.0,
                 "float": False,
