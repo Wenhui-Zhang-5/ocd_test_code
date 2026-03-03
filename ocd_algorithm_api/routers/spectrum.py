@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 try:
@@ -45,6 +45,7 @@ class SpectrumRecordsResponse(BaseModel):
 
 
 class SpectrumFilterOptionsResponse(BaseModel):
+    options: List[str] = Field(default_factory=list)
     tool_options: List[str] = Field(default_factory=list)
     recipe_options: List[str] = Field(default_factory=list)
     lot_options: List[str] = Field(default_factory=list)
@@ -57,18 +58,12 @@ class WaferInfoInput(BaseModel):
     lot: str = ""
     wafer: str = ""
     file_path: str = ""
-    # Backward compatible aliases during migration.
-    lotid: Optional[str] = None
-    waferid: Optional[str] = None
-    path: Optional[str] = None
     record_id: Optional[str] = None
-    spectrum_ids: List[str] = Field(default_factory=list)
 
 
 class SpectrumLoadRequest(BaseModel):
     measure_pos: str = "T1"
     wafer_info_list: List[WaferInfoInput] = Field(default_factory=list)
-    records: List[SpectrumRecord] = Field(default_factory=list)
 
 
 class SpectrumSeries(BaseModel):
@@ -98,8 +93,11 @@ class SpectrumLoadResponse(BaseModel):
 
 
 class SpectrumFilePayload(BaseModel):
-    filename: str
-    meta_info: Dict[str, str] = Field(default_factory=dict)
+    se_filename: str
+    sr_filename: str = ""
+    combine_filename: str = ""
+    se_meta_info: Dict[str, str] = Field(default_factory=dict)
+    sr_meta_info: Dict[str, str] = Field(default_factory=dict)
     se: SpectrumSeries
     sr: SpectrumSrSeries
 
@@ -115,7 +113,6 @@ class PrecisionSummaryRequest(BaseModel):
     min_wavelength: Union[float, str, None] = "default"
     max_wavelength: Union[float, str, None] = "default"
     wafer_info_list: List[WaferInfoInput] = Field(default_factory=list)
-    records: List[SpectrumRecord] = Field(default_factory=list)
 
 
 class PrecisionSummaryResponse(BaseModel):
@@ -136,7 +133,6 @@ class PrecisionPointPlotRequest(BaseModel):
     spec_type: str = "SE"
     point_ids: List[str] = Field(default_factory=list)
     wafer_info_list: List[WaferInfoInput] = Field(default_factory=list)
-    records: List[SpectrumRecord] = Field(default_factory=list)
 
 
 class PrecisionPointPlotResponse(BaseModel):
@@ -556,18 +552,16 @@ def _parse_spectrum_csv(path: Path):
     return meta, wavelength, n_values, c_values, s_values, te_values, tm_values
 
 
-def _resolve_rows_from_payload(
-    wafer_info_list: List[WaferInfoInput], records: List[SpectrumRecord]
-) -> List[SpectrumRecord]:
+def _resolve_rows_from_payload(wafer_info_list: List[WaferInfoInput]) -> List[SpectrumRecord]:
     selected_rows: List[SpectrumRecord] = []
     for info in wafer_info_list:
         record = None
         if info.record_id:
             record = _fetch_record_by_id(info.record_id)
         if record is None:
-            lot = (info.lot or info.lotid or "").strip()
-            wafer = (info.wafer or info.waferid or "").strip()
-            file_path = (info.file_path or info.path or "").strip()
+            lot = (info.lot or "").strip()
+            wafer = (info.wafer or "").strip()
+            file_path = (info.file_path or "").strip()
             record = _fetch_record_by_fields(
                 tool=info.tool,
                 recipe=info.recipe,
@@ -577,20 +571,8 @@ def _resolve_rows_from_payload(
             )
         if record is None:
             continue
-        if info.spectrum_ids:
-            record = SpectrumRecord(
-                id=record.id,
-                time=record.time,
-                tool=record.tool,
-                recipeName=record.recipeName,
-                lotId=record.lotId,
-                waferId=record.waferId,
-                spectrumFolder=record.spectrumFolder,
-                spectrumIds=info.spectrum_ids,
-            )
         selected_rows.append(record)
 
-    selected_rows.extend(records)
     deduped: Dict[str, SpectrumRecord] = {}
     for row in selected_rows:
         key = f"{row.id}::{row.spectrumFolder}"
@@ -774,10 +756,15 @@ def list_spectrum_records(
 def list_spectrum_filter_options(
     start: Optional[str] = None,
     end: Optional[str] = None,
-    tool: Optional[str] = None,
-    recipe: Optional[str] = None,
-    lot: Optional[str] = None,
+    field: Optional[str] = None,
+    tool: Optional[List[str]] = Query(default=None),
+    recipe: Optional[List[str]] = Query(default=None),
+    lot: Optional[List[str]] = Query(default=None),
 ):
+    selected_tools = {str(v).strip() for v in (tool or []) if str(v).strip()}
+    selected_recipes = {str(v).strip() for v in (recipe or []) if str(v).strip()}
+    selected_lots = {str(v).strip() for v in (lot or []) if str(v).strip()}
+
     records = _query_records(start, end, None, None, None, None)
 
     tool_options = sorted({row.tool for row in records if row.tool})
@@ -785,7 +772,7 @@ def list_spectrum_filter_options(
         {
             row.recipeName
             for row in records
-            if row.recipeName and (not tool or row.tool == tool)
+            if row.recipeName and (not selected_tools or row.tool in selected_tools)
         }
     )
     lot_options = sorted(
@@ -793,8 +780,8 @@ def list_spectrum_filter_options(
             row.lotId
             for row in records
             if row.lotId
-            and (not tool or row.tool == tool)
-            and (not recipe or row.recipeName == recipe)
+            and (not selected_tools or row.tool in selected_tools)
+            and (not selected_recipes or row.recipeName in selected_recipes)
         }
     )
     wafer_options = sorted(
@@ -802,13 +789,22 @@ def list_spectrum_filter_options(
             row.waferId
             for row in records
             if row.waferId
-            and (not tool or row.tool == tool)
-            and (not recipe or row.recipeName == recipe)
-            and (not lot or row.lotId == lot)
+            and (not selected_tools or row.tool in selected_tools)
+            and (not selected_recipes or row.recipeName in selected_recipes)
+            and (not selected_lots or row.lotId in selected_lots)
         }
     )
 
+    options_by_field = {
+        "tool": tool_options,
+        "recipe": recipe_options,
+        "lot": lot_options,
+        "wafer": wafer_options,
+    }
+    target_options = options_by_field.get(str(field or "").strip().lower(), [])
+
     return SpectrumFilterOptionsResponse(
+        options=target_options,
         tool_options=tool_options,
         recipe_options=recipe_options,
         lot_options=lot_options,
@@ -823,7 +819,7 @@ def load_spectrum_payload(payload: SpectrumLoadRequest):
     if FAKE_LOAD_DELAY_SECONDS > 0:
         time.sleep(FAKE_LOAD_DELAY_SECONDS)
 
-    selected_rows = _resolve_rows_from_payload(payload.wafer_info_list, payload.records)
+    selected_rows = _resolve_rows_from_payload(payload.wafer_info_list)
 
     out: Dict[str, Dict[str, SpectrumFilePayload]] = {}
     for row in selected_rows:
@@ -838,8 +834,11 @@ def load_spectrum_payload(payload: SpectrumLoadRequest):
             if row.waferId not in out:
                 out[row.waferId] = {}
             out[row.waferId][spectrum_id] = SpectrumFilePayload(
-                filename=file_path.name,
-                meta_info=meta,
+                se_filename=file_path.name,
+                sr_filename=file_path.name,
+                combine_filename="",
+                se_meta_info=meta,
+                sr_meta_info=meta,
                 se=SpectrumSeries(wavelength=wl, n=n_vals, c=c_vals, s=s_vals),
                 sr=SpectrumSrSeries(wavelength=wl if te_vals or tm_vals else [], te=te_vals, tm=tm_vals),
             )
@@ -848,7 +847,7 @@ def load_spectrum_payload(payload: SpectrumLoadRequest):
 
 @router.post("/spectrum/precision-summary", response_model=PrecisionSummaryResponse)
 def calculate_precision_summary(payload: PrecisionSummaryRequest):
-    rows = _resolve_rows_from_payload(payload.wafer_info_list, payload.records)
+    rows = _resolve_rows_from_payload(payload.wafer_info_list)
     wl_min = _resolve_wavelength(payload.min_wavelength)
     wl_max = _resolve_wavelength(payload.max_wavelength)
     spec_type = (payload.spec_type or "SE").upper()
@@ -899,7 +898,7 @@ def calculate_precision_summary(payload: PrecisionSummaryRequest):
 
 @router.post("/spectrum/precision-point-plot", response_model=PrecisionPointPlotResponse)
 def load_precision_point_plot(payload: PrecisionPointPlotRequest):
-    rows = _resolve_rows_from_payload(payload.wafer_info_list, payload.records)
+    rows = _resolve_rows_from_payload(payload.wafer_info_list)
     points = payload.point_ids or []
     if not points:
         return PrecisionPointPlotResponse(spec_type=(payload.spec_type or "SE").upper(), points=[])

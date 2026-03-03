@@ -1,0 +1,25 @@
+{
+  "library": "general",
+  "material": "SiO2",
+  "modelType": "HO",
+  "modelName": "HO1",
+  "params": {
+    "n0": 1.575,
+    "oscillators": [
+      {
+        "amp": 1.492,
+        "en": 2.359,
+        "eg": 1.015,
+        "phi": 0.351,
+        "nu": 0.146
+      },
+      {
+        "amp": 1.061,
+        "en": 1.736,
+        "eg": 2.214,
+        "phi": 0.668,
+        "nu": 0.302
+      }
+    ]
+  }
+}

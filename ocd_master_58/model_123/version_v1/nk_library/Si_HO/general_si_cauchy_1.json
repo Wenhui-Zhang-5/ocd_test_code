@@ -1,0 +1,14 @@
+{
+  "library": "general",
+  "material": "Si",
+  "modelType": "Cauchy",
+  "modelName": "Cauchy",
+  "params": {
+    "A": 1.5377,
+    "B": 0.005799,
+    "C": 0.0004562,
+    "D": 8.4e-05,
+    "E": 9.447e-06,
+    "F": 4.741e-07
+  }
+}

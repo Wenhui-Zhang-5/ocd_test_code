@@ -1,0 +1,42 @@
+{
+  "model_id": "123",
+  "version": "v1",
+  "generated_at": "2026-03-01T16:39:46Z",
+  "nk_library_dir": "/Users/wenhuizhang/Projects/Gradio/ocd_master_58/model_123/version_v1/nk_library",
+  "materialSeedsCopied": {
+    "Si_HO": [
+      {
+        "source": "general/Si/Cauchy.json",
+        "target": "nk_library/Si_HO/general_si_cauchy_4.json",
+        "target_filename": "general_si_cauchy_4.json"
+      },
+      {
+        "source": "general/Si/HO1.json",
+        "target": "nk_library/Si_HO/general_si_ho1_4.json",
+        "target_filename": "general_si_ho1_4.json"
+      },
+      {
+        "source": "general/Si/HO2.json",
+        "target": "nk_library/Si_HO/general_si_ho2_4.json",
+        "target_filename": "general_si_ho2_4.json"
+      }
+    ],
+    "SiO2_Cauchy": [
+      {
+        "source": "general/SiO2/Cauchy.json",
+        "target": "nk_library/SiO2_Cauchy/general_sio2_cauchy_4.json",
+        "target_filename": "general_sio2_cauchy_4.json"
+      },
+      {
+        "source": "general/SiO2/HO1.json",
+        "target": "nk_library/SiO2_Cauchy/general_sio2_ho1_4.json",
+        "target_filename": "general_sio2_ho1_4.json"
+      },
+      {
+        "source": "general/SiO2/HO2.json",
+        "target": "nk_library/SiO2_Cauchy/general_sio2_ho2_4.json",
+        "target_filename": "general_sio2_ho2_4.json"
+      }
+    ]
+  }
+}

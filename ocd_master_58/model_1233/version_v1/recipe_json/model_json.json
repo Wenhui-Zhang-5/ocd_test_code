@@ -1,0 +1,221 @@
+{
+  "content": {
+    "basis": [
+      {
+        "alias": "CD_TOP",
+        "custom_name": "Top CD",
+        "name": "CD_TOP",
+        "float": false,
+        "nominal": 35.43,
+        "nominalNew": 35.43,
+        "min": 31.89,
+        "max": 38.97
+      },
+      {
+        "alias": "CD_BOTTOM",
+        "custom_name": "Bottom CD",
+        "name": "CD_BOTTOM",
+        "float": false,
+        "nominal": 24.06,
+        "nominalNew": 24.06,
+        "min": 21.65,
+        "max": 26.47
+      }
+    ],
+    "constraint": [
+      {
+        "alias": "CD_MID",
+        "equation": "0.5*CD_TOP + 0.5*CD_BOTTOM",
+        "nominal": 29.74,
+        "nominalNew": 29.74
+      }
+    ],
+    "mat": [
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-1",
+        "name": "Amp",
+        "value": 0.761,
+        "valueNew": 0.761,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-1",
+        "name": "En",
+        "value": 4.749,
+        "valueNew": 4.749,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-1",
+        "name": "Eg",
+        "value": 2.364,
+        "valueNew": 2.364,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-1",
+        "name": "Phi",
+        "value": 0.112,
+        "valueNew": 0.112,
+        "float": false
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-1",
+        "name": "Nu",
+        "value": 0.204,
+        "valueNew": 0.204,
+        "float": false
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-2",
+        "name": "Amp",
+        "value": 0.886,
+        "valueNew": 0.886,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-2",
+        "name": "En",
+        "value": 4.398,
+        "valueNew": 4.398,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-2",
+        "name": "Eg",
+        "value": 1.948,
+        "valueNew": 1.948,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-2",
+        "name": "Phi",
+        "value": 0.142,
+        "valueNew": 0.142,
+        "float": false
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-2",
+        "name": "Nu",
+        "value": 0.347,
+        "valueNew": 0.347,
+        "float": false
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-3",
+        "name": "Amp",
+        "value": 0.55,
+        "valueNew": 0.55,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-3",
+        "name": "En",
+        "value": 3.574,
+        "valueNew": 3.574,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-3",
+        "name": "Eg",
+        "value": 2.81,
+        "valueNew": 2.81,
+        "float": true
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-3",
+        "name": "Phi",
+        "value": 0.142,
+        "valueNew": 0.142,
+        "float": false
+      },
+      {
+        "material": "Si_HO",
+        "model": "HarmonicsOSC-3",
+        "name": "Nu",
+        "value": 0.153,
+        "valueNew": 0.153,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "A",
+        "value": 1.46,
+        "valueNew": 1.46,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "B",
+        "value": 0.0023,
+        "valueNew": 0.0037,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "C",
+        "value": 0.00019,
+        "valueNew": 0.00015,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "E",
+        "value": 0,
+        "valueNew": 0,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "F",
+        "value": 0,
+        "valueNew": 0,
+        "float": false
+      },
+      {
+        "material": "SiO2_Cauchy",
+        "model": "Cauchy",
+        "name": "G",
+        "value": 0,
+        "valueNew": 0,
+        "float": false
+      }
+    ],
+    "proj_params": {
+      "SEwavelength": [
+        [
+          190,
+          500,
+          1,
+          1
+        ],
+        [
+          500,
+          1000,
+          1,
+          2
+        ]
+      ],
+      "SESRRatio": 0.821
+    }
+  }
+}

@@ -125,9 +125,9 @@ const buildObjectRowKey = (row, index = 0) => {
   if (recordId) return `id:${recordId}`;
   const tool = row?.tool || "";
   const recipe = row?.recipeName || row?.recipe || "";
-  const lot = row?.lotId || row?.lot || row?.lotid || "";
-  const wafer = row?.waferId || row?.wafer || row?.waferid || "";
-  const path = row?.spectrumFolder || row?.file_path || row?.path || "";
+  const lot = row?.lotId || row?.lot || "";
+  const wafer = row?.waferId || row?.wafer || "";
+  const path = row?.spectrumFolder || row?.file_path || "";
   const time = row?.time || "";
   return `row:${tool}|${recipe}|${lot}|${wafer}|${path}|${time}|${index}`;
 };
@@ -275,10 +275,10 @@ export default function Spectrum({ workspaceId }) {
       return payload.spectra.map((item) => ({
         waferId: item.wafer_id || item.waferId,
         spectrumId: item.spectrum_id || item.spectrumId,
-        seFilename: item.se_filename || item.filename || "",
+        seFilename: item.se_filename || "",
         srFilename: item.sr_filename || "",
-        combineFilename: item.combine_filename || item.combineFilename || "",
-        seMetaInfo: item.se_meta_info || item.meta_info || {},
+        combineFilename: item.combine_filename || "",
+        seMetaInfo: item.se_meta_info || {},
         srMetaInfo: item.sr_meta_info || {},
         se: item?.se || {},
         sr: item?.sr || {},
@@ -293,10 +293,10 @@ export default function Spectrum({ workspaceId }) {
           rows.push({
             waferId,
             spectrumId,
-            seFilename: item?.se_filename || item?.filename || "",
+            seFilename: item?.se_filename || "",
             srFilename: item?.sr_filename || "",
-            combineFilename: item?.combine_filename || item?.combineFilename || "",
-            seMetaInfo: item?.se_meta_info || item?.meta_info || {},
+            combineFilename: item?.combine_filename || "",
+            seMetaInfo: item?.se_meta_info || {},
             srMetaInfo: item?.sr_meta_info || {},
             se: item?.se || {},
             sr: item?.sr || {},
@@ -516,12 +516,7 @@ export default function Spectrum({ workspaceId }) {
         throw new Error(`Filter options API failed for field=${field}`);
       }
       const data = await response.json();
-      if (Array.isArray(data.options)) return data.options;
-      if (field === "tool" && Array.isArray(data.tool_options)) return data.tool_options;
-      if (field === "recipe" && Array.isArray(data.recipe_options)) return data.recipe_options;
-      if (field === "lot" && Array.isArray(data.lot_options)) return data.lot_options;
-      if (field === "wafer" && Array.isArray(data.wafer_options)) return data.wafer_options;
-      return [];
+      return Array.isArray(data.options) ? data.options : [];
     };
     const fetchFilterOptions = async () => {
       try {
@@ -819,7 +814,7 @@ export default function Spectrum({ workspaceId }) {
       if (!map[row.waferId]) {
         map[row.waferId] = [];
       }
-      if (!map[row.waferId].includes(row.spectrumId)) {
+      if (!map[row.waferId].includes(frow.spectrumId)) {
         map[row.waferId].push(row.spectrumId);
       }
     });
