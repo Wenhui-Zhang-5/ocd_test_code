@@ -1,0 +1,260 @@
+{
+  "schemaVersion": "2.1.0",
+  "recipeId": "RCP-20260221-0001",
+  "workspaceId": "WKS-0001",
+  "status": "draft",
+  "recipeMeta": {
+    "modelId": "MODEL_122345",
+    "recipeName": "GateStack_Dev",
+    "owner": "You",
+    "project": "Project-01",
+    "productId": "P-01",
+    "loop": "L1",
+    "layout": "Default",
+    "state": "draft",
+    "version": "v1.0"
+  },
+  "spectrumAnalysis": {
+    "spectrumSelection": {
+      "timeRange": {
+        "start": "2026-02-01T00:00:00Z",
+        "end": "2026-02-21T00:00:00Z"
+      },
+      "toolId": "Tool-A01",
+      "recipeName": "Gate Stack",
+      "waferIds": [
+        "WAFER-0001",
+        "WAFER-0042"
+      ],
+      "removedSpectra": [
+        {
+          "waferId": "WAFER-0001",
+          "spectrumCsv": "SPEC_0019.csv"
+        },
+        {
+          "waferId": "WAFER-0042",
+          "spectrumCsv": "SPEC_0005.csv"
+        }
+      ]
+    },
+    "spectrumTransfer": {
+      "transferId": "XFER-1740112233445",
+      "sourceServer": "242",
+      "targetServer": "58",
+      "targetRoot": "/data/ocd_spectra",
+      "targetFolder": "model_id_MODEL_122345_version_v1.0",
+      "precisionFolder": "model_id_MODEL_122345_version_v1.0/precision",
+      "copyMode": "full-wafer",
+      "copiedWafers": [
+        "WAFER-0001",
+        "WAFER-0042"
+      ],
+      "status": "done",
+      "copiedAt": "2026-02-21T10:20:33.445Z"
+    }
+  },
+  "precision": {
+    "worstPointId": "P-17"
+  },
+  "preRecipe": {
+    "recipeSetup": {
+      "waferIds": [
+        "WAFER-0001",
+        "WAFER-0042"
+      ],
+      "baseline": {
+        "waferId": "WAFER-0001",
+        "spectrumId": "SPEC_0001"
+      }
+    },
+    "model": {
+      "modelJson": {
+        "content": {
+          "basis": [],
+          "constraint": [],
+          "mat": [],
+          "proj_params": {
+            "SEWavelength": []
+          }
+        }
+      },
+      "basisEdits": [
+        {
+          "name": "CD_TOP",
+          "nominal": 32,
+          "min": 29,
+          "max": 35
+        }
+      ],
+      "spectrumRange": [
+        {
+          "min": 190,
+          "max": 500,
+          "step": 1,
+          "weight": 1
+        },
+        {
+          "min": 500,
+          "max": 1000,
+          "step": 1,
+          "weight": 2
+        }
+      ],
+      "seSrRatio": 1.0
+    },
+    "temKpi": {
+      "temTable": [
+        {
+          "waferId": "WAFER-0001",
+          "spectrumId": "SPEC_0001",
+          "CD1": 31.9,
+          "CD2": 28.6
+        }
+      ],
+      "kpiThresholds": [
+        {
+          "cd": "CD1",
+          "slope_low": 0.9,
+          "slope_high": 1.0,
+          "r2": 0.95,
+          "sbs": 1.0,
+          "precision": 0.2
+        }
+      ]
+    }
+  },
+  "recipeBuild": {
+    "startingPoint": {
+      "sourceType": "material",
+      "materialMapping": {
+        "Si_HO": "Si",
+        "SiO2_Cauchy": "SiO2"
+      },
+      "materialSeeds": {
+        "Si_HO": [
+          "nk://general/Si/HO1.json",
+          "nk://project1/Si/HO2.json"
+        ],
+        "SiO2_Cauchy": [
+          "nk://general/SiO2/Cauchy1.json"
+        ]
+      },
+      "checkpointSeeds": []
+    },
+    "cdStrategy": {
+      "mustFloat": [
+        "CD_TOP"
+      ],
+      "mustFix": [
+        "CD_BOTTOM"
+      ],
+      "maybe": [
+        "CD_MID"
+      ],
+      "gridFixed": [
+        {
+          "cd": "CD_MID",
+          "customValues": [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "couplingSchemes": [
+        {
+          "name": "Scheme A",
+          "expression": "0.5*CD_TOP+0.5*CD_BOTTOM"
+        }
+      ]
+    },
+    "fittingStrategy": {
+      "materialOrder": [
+        "TiN",
+        "Si",
+        "SiN",
+        "SiO2"
+      ],
+      "mode": "column",
+      "executionStepsByMaterial": {
+        "Si_HO": [
+          {
+            "name": "Step 1",
+            "targets": [
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-1",
+                "name": "Amp"
+              },
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-2",
+                "name": "Amp"
+              },
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-3",
+                "name": "Amp"
+              }
+            ]
+          },
+          {
+            "name": "Step 2",
+            "targets": [
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-1",
+                "name": "En"
+              },
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-2",
+                "name": "En"
+              },
+              {
+                "material": "Si_HO",
+                "model": "HarmonicsOSC-3",
+                "name": "En"
+              }
+            ]
+          }
+        ],
+        "SiO2_Cauchy": [
+          {
+            "name": "Step 1",
+            "targets": [
+              {
+                "material": "SiO2_Cauchy",
+                "model": "Cauchy",
+                "name": "A"
+              },
+              {
+                "material": "SiO2_Cauchy",
+                "model": "Cauchy",
+                "name": "B"
+              },
+              {
+                "material": "SiO2_Cauchy",
+                "model": "Cauchy",
+                "name": "C"
+              }
+            ]
+          }
+        ]
+      },
+      "globalSettings": {
+        "enableSensitivity": false,
+        "sensitivityMin": 0.5,
+        "sensitivityMax": 3,
+        "sensitivityWindow": 10,
+        "topNSeed": 5,
+        "earlyStopEnabled": false,
+        "earlyStopCount": 1,
+        "fittingIteration": 1,
+        "linearIteration": 2,
+        "estimatedTime": "2h 10m"
+      }
+    }
+  }
+}
