@@ -30,56 +30,7 @@ const defaultMetaOptions = {
 };
 
 const defaultState = {
-  workspaces: [
-    {
-      id: "temp",
-      type: "temporary",
-      status: "temp",
-      modelID: null,
-      recipeName: "Temporary Workspace",
-      owner: "You",
-      project: "Project-Temp",
-      productId: "P-Temp",
-      version: "v0.1",
-      updatedAt: "Just now"
-    },
-    {
-      id: "M-ALD-77",
-      type: "model",
-      status: "running",
-      modelID: "M-ALD-77",
-      recipeName: "ALD Gate V2",
-      owner: "L. Chen",
-      project: "Project-01",
-      productId: "P-01",
-      version: "v1.2",
-      updatedAt: "4 min ago"
-    },
-    {
-      id: "M-ALD-65",
-      type: "model",
-      status: "queued",
-      modelID: "M-ALD-65",
-      recipeName: "Spacer Etch B",
-      owner: "J. Wu",
-      project: "Project-02",
-      productId: "P-02",
-      version: "v1.0",
-      updatedAt: "25 min ago"
-    },
-    {
-      id: "M-ET-21",
-      type: "model",
-      status: "completed",
-      modelID: "M-ET-21",
-      recipeName: "High-K Stack",
-      owner: "Y. Zhang",
-      project: "Project-03",
-      productId: "P-03",
-      version: "v2.0",
-      updatedAt: "Yesterday"
-    }
-  ],
+  workspaces: [],
   templates: [
     {
       templateId: "tpl_001",
@@ -821,24 +772,11 @@ export const resetMockState = () => {
   }
 };
 
-export const clearRecipeHub = () => {
+export const clearRecipeHub = async () => {
   const state = loadState();
-  const tempWorkspace =
-    state.workspaces.find((workspace) => workspace.id === "temp") || {
-      id: "temp",
-      type: "temporary",
-      status: "temp",
-      modelID: null,
-      recipeName: "Temporary Workspace",
-      owner: "You",
-      project: "Project-Temp",
-      productId: "P-Temp",
-      version: "v0.1",
-      updatedAt: "Just now"
-    };
   const clearedState = {
     ...clone(defaultState),
-    workspaces: [{ ...tempWorkspace, updatedAt: "Just now", seq: 0 }],
+    workspaces: [],
     runs: [],
     runDetail: {},
     checkpointLibrary: {},
@@ -856,6 +794,8 @@ export const clearRecipeHub = () => {
   runtimeCache.precisionByWorkspace = {};
   runtimeCache.tempSpectrumSelection = null;
   runtimeCache.tempPrecisionSelection = null;
+  await syncRecipeHubToServer();
+  await pullRecipeHubFromServer();
 };
 
 const isDeletableRecipeStatus = (status) => {
@@ -942,12 +882,29 @@ export const deleteRecipeHubEntries = async (workspaceIds = []) => {
     ])
   );
 
+  await syncRecipeHubToServer();
+  await pullRecipeHubFromServer();
+
   return { deleted: targets.length };
 };
 
 export const getWorkspace = (id) => {
   const state = loadState();
-  return state.workspaces.find((workspace) => workspace.id === id || workspace.modelID === id) || null;
+  const found =
+    state.workspaces.find((workspace) => workspace.id === id || workspace.modelID === id) || null;
+  if (found) return found;
+  if (String(id || "").trim() === "temp") {
+    return {
+      id: "temp",
+      type: "temporary",
+      status: "temp",
+      modelID: null,
+      recipeName: "Temporary Workspace",
+      owner: "You",
+      updatedAt: "Just now"
+    };
+  }
+  return null;
 };
 
 export const shouldPersistWorkspaceCaseCache = (workspaceId) => {
@@ -1018,48 +975,15 @@ export const clearWorkspaceCaseCache = async (workspaceId) => {
 };
 
 export const createTemporaryWorkspace = () => {
-  const state = loadState();
-  let existing = state.workspaces.find((workspace) => workspace.id === "temp");
-  if (!existing) {
-    existing = {
-      id: "temp",
-      type: "temporary",
-      status: "temp",
-      modelID: null,
-      recipeName: "Temporary Workspace",
-      owner: "You",
-      updatedAt: "Just now"
-    };
-    state.workspaces.unshift(existing);
-    saveState();
-    return existing;
-  }
-  let dirty = false;
-  if (existing.type !== "temporary") {
-    existing.type = "temporary";
-    dirty = true;
-  }
-  if (existing.status !== "temp") {
-    existing.status = "temp";
-    dirty = true;
-  }
-  if (existing.modelID !== null) {
-    existing.modelID = null;
-    dirty = true;
-  }
-  if (!existing.recipeName) {
-    existing.recipeName = "Temporary Workspace";
-    dirty = true;
-  }
-  if (!existing.owner) {
-    existing.owner = "You";
-    dirty = true;
-  }
-  if (dirty) {
-    existing.updatedAt = "Just now";
-    saveState();
-  }
-  return existing;
+  return {
+    id: "temp",
+    type: "temporary",
+    status: "temp",
+    modelID: null,
+    recipeName: "Temporary Workspace",
+    owner: "You",
+    updatedAt: "Just now"
+  };
 };
 
 const nextWorkspaceSeqAndId = (state) => {

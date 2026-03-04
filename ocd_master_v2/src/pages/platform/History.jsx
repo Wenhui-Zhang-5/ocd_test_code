@@ -59,10 +59,10 @@ export default function Assets() {
     return normalized === "draft" || normalized === "completed" || normalized === "complete";
   };
 
-  const handleClearRecipeHub = () => {
+  const handleClearRecipeHub = async () => {
     const confirmed = window.confirm("Clear all Recipe Hub entries? This will remove all current recipes and runs.");
     if (!confirmed) return;
-    clearRecipeHub();
+    await clearRecipeHub();
     setProjectFilter("");
     setProductFilter("");
     setOwnerFilter("");

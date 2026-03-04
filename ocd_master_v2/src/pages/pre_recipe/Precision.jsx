@@ -20,6 +20,10 @@ import {
   setSpectrumRuntimeCache,
   setSpectrumSelection
 } from "../../data/mockApi.js";
+import {
+  loadRuntimeFromIndexedDb,
+  saveRuntimeToIndexedDb
+} from "../../data/runtimeIndexedDb.js";
 import { SPECTRUM_API_BASE } from "../../config/env.js";
 import { isWorkspaceReadOnly } from "../../data/workspaceAccess.js";
 const DEFAULT_POINT_IDS = Array.from({ length: 17 }).map(
@@ -107,9 +111,16 @@ const buildPointPlotTraces = (pointCurves, mode) => {
     const color = palette[pointOrder[pointId] % palette.length];
     channels.forEach((channel, channelIndex) => {
       const source = curve?.[channel.source] || {};
-      const x = source.wavelength || [];
-      const y = source[channel.key] || [];
-      if (!x.length || !y.length) return;
+      const yRaw = Array.isArray(source[channel.key]) ? source[channel.key] : [];
+      const xRaw = Array.isArray(source.wavelength) && source.wavelength.length
+        ? source.wavelength
+        : Array.isArray(curve?.se?.wavelength)
+          ? curve.se.wavelength
+          : [];
+      const size = Math.min(xRaw.length, yRaw.length);
+      if (!size) return;
+      const x = xRaw.slice(0, size);
+      const y = yRaw.slice(0, size);
       const axisSuffix = channelIndex === 0 ? "" : `${channelIndex + 1}`;
       traces.push({
         x,
@@ -273,6 +284,10 @@ export default function Precision({ workspaceId }) {
   const restoreHydrationRef = useRef(false);
   const pointPlotRef = useRef(null);
   const pointPlotlyRef = useRef(null);
+  const persistIndexedRuntime = (runtimePayload) => {
+    if (!workspaceId || !runtimePayload) return;
+    void saveRuntimeToIndexedDb("precision", workspaceId, runtimePayload);
+  };
   const isSelectionForWorkspace = (selection) => {
     if (!selection || typeof selection !== "object") return false;
     if (!workspaceId) return false;
@@ -332,69 +347,81 @@ export default function Precision({ workspaceId }) {
     return rows;
   };
 
+  const startWaferProgressTicker = (waferCount) => {
+    const safeWaferCount = Math.max(1, Number(waferCount) || 1);
+    const estimatedDurationMs = safeWaferCount * 4000;
+    const startedAt = Date.now();
+    const timer = globalThis.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const estimated = Math.min(95, Math.max(1, Math.round((elapsed / estimatedDurationMs) * 95)));
+      setLoadingProgress((prev) => (prev >= estimated ? prev : estimated));
+    }, 120);
+    return () => globalThis.clearInterval(timer);
+  };
+
   const loadPrecisionSpectra = async (rows, measurePos = measurePosition) => {
-    const response = await fetch(`${SPECTRUM_API_BASE}/get_spectra`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        measure_pos: measurePos,
-        wafer_info_list: rows.map((row) => ({
-          tool: row.tool,
-          recipe: row.recipeName,
-          lot: row.lotId || "",
-          wafer: row.waferId,
-          file_path: row.spectrumFolder,
-          record_id: row._recordId || row.id || row.record_id || row.recordId || ""
-        }))
-      })
-    });
-    if (!response.ok) {
-      throw new Error("Failed to load precision spectra via API");
-    }
-    const data = await response.json();
-    const loadedSpectra = normalizeLoadedSpectra(data);
-    const expectedCount = loadedSpectra.length;
-    const store = {};
-    const table = [];
-    let loaded = 0;
-    loadedSpectra.forEach((item) => {
-      const waferId = item.waferId;
-      const spectrumId = item.spectrumId;
-      if (!waferId || !spectrumId) return;
-      if (!store[waferId]) {
-        store[waferId] = {};
-      }
-      store[waferId][spectrumId] = {
-        seFilename: item.seFilename || "",
-        srFilename: item.srFilename || "",
-        seMeta: item.seMetaInfo || {},
-        srMeta: item.srMetaInfo || {},
-        se: {
-          wavelength: item.se?.wavelength || [],
-          n: item.se?.n || [],
-          c: item.se?.c || [],
-          s: item.se?.s || []
-        },
-        sr: {
-          wavelength: item.sr?.wavelength || [],
-          te: item.sr?.te || [],
-          tm: item.sr?.tm || []
-        },
-        path: item.sourcePath || ""
-      };
-      table.push({
-        waferId,
-        spectrumId,
-        path: item.sourcePath || "",
-        seFilename: item.seFilename || "",
-        srFilename: item.srFilename || ""
+    const stopProgressTicker = startWaferProgressTicker(rows.length);
+    try {
+      const response = await fetch(`${SPECTRUM_API_BASE}/get_spectra`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          measure_pos: measurePos,
+          wafer_info_list: rows.map((row) => ({
+            tool: row.tool,
+            recipe: row.recipeName,
+            lot: row.lotId || "",
+            wafer: row.waferId,
+            file_path: row.spectrumFolder,
+            record_id: row._recordId || row.id || row.record_id || row.recordId || ""
+          }))
+        })
       });
-      loaded += 1;
-      if (expectedCount > 0) {
-        setLoadingProgress(Math.round((loaded / expectedCount) * 100));
+      if (!response.ok) {
+        throw new Error("Failed to load precision spectra via API");
       }
-    });
-    return { store, table };
+      const data = await response.json();
+      const loadedSpectra = normalizeLoadedSpectra(data);
+      const store = {};
+      const table = [];
+      loadedSpectra.forEach((item) => {
+        const waferId = item.waferId;
+        const spectrumId = item.spectrumId;
+        if (!waferId || !spectrumId) return;
+        if (!store[waferId]) {
+          store[waferId] = {};
+        }
+        store[waferId][spectrumId] = {
+          seFilename: item.seFilename || "",
+          srFilename: item.srFilename || "",
+          seMeta: item.seMetaInfo || {},
+          srMeta: item.srMetaInfo || {},
+          se: {
+            wavelength: item.se?.wavelength || [],
+            n: item.se?.n || [],
+            c: item.se?.c || [],
+            s: item.se?.s || []
+          },
+          sr: {
+            wavelength: item.sr?.wavelength || [],
+            te: item.sr?.te || [],
+            tm: item.sr?.tm || []
+          },
+          path: item.sourcePath || ""
+        };
+        table.push({
+          waferId,
+          spectrumId,
+          path: item.sourcePath || "",
+          seFilename: item.seFilename || "",
+          srFilename: item.srFilename || ""
+        });
+      });
+      setLoadingProgress(100);
+      return { store, table };
+    } finally {
+      stopProgressTicker();
+    }
   };
 
   const toWaferInfoList = (rows) =>
@@ -481,25 +508,7 @@ export default function Precision({ workspaceId }) {
         autoCurves
       );
       setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
-      await persistWorkspacePrecisionCache({
-        selection: {
-          timeRange: { start: timeStart, end: timeEnd },
-          tool: machineId,
-          recipeName,
-          lotId,
-          measurePosition,
-          specType: precisionSpecType,
-          pointPlotMode,
-          inputWaferIds: selectedWafers,
-          wafers,
-          selectedRows,
-          objectRows: chosen,
-          selectedSpectra: table,
-          spectraByWafer,
-          restoreReady: true
-        },
-        runtime: runtimeSnapshot
-      });
+      persistIndexedRuntime(runtimeSnapshot);
       setShowSummary(true);
     } catch (error) {
       setRecordsError("Failed to load spectra from API.");
@@ -818,7 +827,9 @@ export default function Precision({ workspaceId }) {
       return;
     }
     const curvesFromStore = buildPointCurvesFromStore(spectraStore, selectedPoints);
-    if (curvesFromStore.length) {
+    const hasRenderableStoreCurves =
+      curvesFromStore.length > 0 && buildPointPlotTraces(curvesFromStore, pointPlotMode).length > 0;
+    if (hasRenderableStoreCurves) {
       setPointPlotError("");
       setPointPlotCurves(curvesFromStore);
       const runtimeSnapshot = buildPrecisionRuntimeSnapshot(
@@ -831,26 +842,7 @@ export default function Precision({ workspaceId }) {
         curvesFromStore
       );
       setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
-      persistWorkspacePrecisionCache({
-        selection: {
-          timeRange: { start: timeStart, end: timeEnd },
-          tool: machineId,
-          recipeName,
-          lotId,
-          measurePosition,
-          specType: precisionSpecType,
-          pointPlotMode,
-          inputWaferIds: selectedWafers,
-          wafers: importedWafers,
-          selectedRows,
-          objectRows: importedObjectRows,
-          selectedSpectra: selectedSpectrumTable,
-          summaryRows,
-          points: selectedPoints,
-          restoreReady: showSummary && importedObjectRows.length > 0 && selectedSpectrumTable.length > 0
-        },
-        runtime: runtimeSnapshot
-      });
+      persistIndexedRuntime(runtimeSnapshot);
       return;
     }
     setPointPlotLoading(true);
@@ -873,26 +865,7 @@ export default function Precision({ workspaceId }) {
         curves
       );
       setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
-      persistWorkspacePrecisionCache({
-        selection: {
-          timeRange: { start: timeStart, end: timeEnd },
-          tool: machineId,
-          recipeName,
-          lotId,
-          measurePosition,
-          specType: precisionSpecType,
-          pointPlotMode,
-          inputWaferIds: selectedWafers,
-          wafers: importedWafers,
-          selectedRows,
-          objectRows: importedObjectRows,
-          selectedSpectra: selectedSpectrumTable,
-          summaryRows,
-          points: selectedPoints,
-          restoreReady: showSummary && importedObjectRows.length > 0 && selectedSpectrumTable.length > 0
-        },
-        runtime: runtimeSnapshot
-      });
+      persistIndexedRuntime(runtimeSnapshot);
     } catch (error) {
       setPointPlotCurves([]);
       setPointPlotError(error?.message || "Failed to load point spectra.");
@@ -964,26 +937,7 @@ export default function Precision({ workspaceId }) {
         pointPlotCurves
       );
       setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
-      persistWorkspacePrecisionCache({
-        selection: {
-          timeRange: { start: timeStart, end: timeEnd },
-          tool: machineId,
-          recipeName,
-          lotId,
-          measurePosition,
-          specType: precisionSpecType,
-          pointPlotMode,
-          inputWaferIds: selectedWafers,
-          wafers: importedWafers,
-          selectedRows,
-          objectRows: importedObjectRows,
-          selectedSpectra: selectedSpectrumTable,
-          summaryRows: mappedRows,
-          points: selectedPoints,
-          restoreReady: importedObjectRows.length > 0 && selectedSpectrumTable.length > 0
-        },
-        runtime: runtimeSnapshot
-      });
+      persistIndexedRuntime(runtimeSnapshot);
     } catch (error) {
       setCalcError(error?.message || "Failed to calculate precision summary.");
     } finally {
@@ -1014,7 +968,10 @@ export default function Precision({ workspaceId }) {
       const persistedSelection = persistedCache?.precision?.selection || null;
       const persistedRuntime = persistedCache?.precision?.runtime || null;
       const source = persistedSelection || temp || saved;
-      const runtime = cache || persistedRuntime || null;
+      const indexedRuntime =
+        cache || persistedRuntime ? null : await loadRuntimeFromIndexedDb("precision", workspaceId);
+      if (cancelled) return;
+      const runtime = cache || persistedRuntime || indexedRuntime || null;
       if (!source && !runtime) return;
 
       restoringRef.current = true;
@@ -1072,6 +1029,7 @@ export default function Precision({ workspaceId }) {
           setMaxWavelength(String(runtime.maxWavelength));
         }
         setPrecisionRuntimeCache(workspaceId, runtime);
+        persistIndexedRuntime(runtime);
         setLoadingImport(false);
         setLoadingProgress(0);
         finishRestore();
@@ -1209,10 +1167,10 @@ export default function Precision({ workspaceId }) {
     maxWavelength: maxWavelength.trim() === "" ? "default" : Number(maxWavelength)
   });
 
-  const persistWorkspacePrecisionCache = async (payload) => {
+  const persistWorkspacePrecisionCache = (payload) => {
     if (!workspaceId) return;
     if (!shouldPersistWorkspaceCaseCache(workspaceId)) return;
-    await saveWorkspaceCaseCacheSection(workspaceId, "precision", payload || {});
+    void saveWorkspaceCaseCacheSection(workspaceId, "precision", payload || {});
   };
 
   const buildPrecisionPayload = (modelID) => ({
@@ -1276,9 +1234,10 @@ export default function Precision({ workspaceId }) {
       pointPlotCurves
     );
     setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
+    persistIndexedRuntime(runtimeSnapshot);
     if (!isTempWorkspace) {
       saveRecipeSchema(workspaceId, buildPrecisionPayload());
-      await persistWorkspacePrecisionCache({
+      persistWorkspacePrecisionCache({
         selection: selectionPayload,
         runtime: runtimeSnapshot
       });
@@ -1346,8 +1305,9 @@ export default function Precision({ workspaceId }) {
           const spectrumRuntime = getSpectrumRuntimeCache("temp");
           if (spectrumRuntime) {
             setSpectrumRuntimeCache(promotedWorkspaceId, spectrumRuntime);
+            void saveRuntimeToIndexedDb("spectrum", promotedWorkspaceId, spectrumRuntime);
           }
-          await saveWorkspaceCaseCacheSection(promotedWorkspaceId, "spectrum", {
+          void saveWorkspaceCaseCacheSection(promotedWorkspaceId, "spectrum", {
             selection: promotedSpectrumSelection,
             runtime: spectrumRuntime || {}
           });
@@ -1388,13 +1348,14 @@ export default function Precision({ workspaceId }) {
             pointPlotCurves
           );
         setPrecisionRuntimeCache(promotedWorkspaceId, promotedPrecisionRuntime);
-        await saveWorkspaceCaseCacheSection(promotedWorkspaceId, "precision", {
+        void saveRuntimeToIndexedDb("precision", promotedWorkspaceId, promotedPrecisionRuntime);
+        void saveWorkspaceCaseCacheSection(promotedWorkspaceId, "precision", {
           selection: promotedPrecisionSelection,
           runtime: promotedPrecisionRuntime
         });
 
         saveRecipeSchema(workspace.id, buildPrecisionPayload(workspace.modelID));
-        await saveWorkspaceCaseCacheSection(promotedWorkspaceId, "schema", {
+        void saveWorkspaceCaseCacheSection(promotedWorkspaceId, "schema", {
           recipeSchema: loadRecipeSchema(promotedWorkspaceId) || {}
         });
         window.location.hash = buildHashHref(`/ocd/workspace/${workspace.id}/pre-recipe/recipe-setup`);

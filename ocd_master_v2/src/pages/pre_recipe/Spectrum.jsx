@@ -13,6 +13,11 @@ import {
   setSpectrumRuntimeCache,
   setSpectrumSelection
 } from "../../data/mockApi.js";
+import {
+  clearRuntimeFromIndexedDb,
+  loadRuntimeFromIndexedDb,
+  saveRuntimeToIndexedDb
+} from "../../data/runtimeIndexedDb.js";
 import { OUTLIER_API_URL, SPECTRUM_API_BASE } from "../../config/env.js";
 import { isWorkspaceReadOnly } from "../../data/workspaceAccess.js";
 
@@ -187,6 +192,10 @@ export default function Spectrum({ workspaceId }) {
     waferOptions: []
   });
   const [themeTick, setThemeTick] = useState(0);
+  const persistIndexedRuntime = (runtimePayload) => {
+    if (!workspaceId || !runtimePayload) return;
+    void saveRuntimeToIndexedDb("spectrum", workspaceId, runtimePayload);
+  };
   const plotRef = useRef(null);
   const plotlyRef = useRef(null);
   const restoringRef = useRef(false);
@@ -260,10 +269,10 @@ export default function Spectrum({ workspaceId }) {
       selectedSpectrumTable.length > 0
   });
 
-  const persistWorkspaceSpectrumCache = async (payload) => {
+  const persistWorkspaceSpectrumCache = (payload) => {
     if (!workspaceId) return;
     if (!shouldPersistWorkspaceCaseCache(workspaceId)) return;
-    await saveWorkspaceCaseCacheSection(workspaceId, "spectrum", payload || {});
+    void saveWorkspaceCaseCacheSection(workspaceId, "spectrum", payload || {});
   };
 
   const handleConfirm = () => {
@@ -308,72 +317,84 @@ export default function Spectrum({ workspaceId }) {
     return rows;
   };
 
+  const startWaferProgressTicker = (waferCount) => {
+    const safeWaferCount = Math.max(1, Number(waferCount) || 1);
+    const estimatedDurationMs = safeWaferCount * 4000;
+    const startedAt = Date.now();
+    const timer = globalThis.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const estimated = Math.min(95, Math.max(1, Math.round((elapsed / estimatedDurationMs) * 95)));
+      setLoadingProgress((prev) => (prev >= estimated ? prev : estimated));
+    }, 120);
+    return () => globalThis.clearInterval(timer);
+  };
+
   const loadSpectra = async (rows, measurePos = measurePosition) => {
     const store = {};
     const spectrumTable = [];
-    const response = await fetch(`${SPECTRUM_API_BASE}/get_spectra`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        measure_pos: measurePos,
-        wafer_info_list: rows.map((row) => ({
-          tool: row.tool,
-          recipe: row.recipeName,
-          lot: row.lotId || "",
-          wafer: row.waferId,
-          file_path: row.spectrumFolder,
-          record_id: row._recordId || row.id || row.record_id || row.recordId || ""
-        }))
-      })
-    });
-    if (!response.ok) {
-      throw new Error("Failed to load spectra via API");
-    }
-    const data = await response.json();
-    const loadedSpectra = normalizeLoadedSpectra(data);
-    const expectedCount = loadedSpectra.length;
-    let loaded = 0;
-    loadedSpectra.forEach((item) => {
-      const waferId = item.waferId;
-      const spectrumId = item.spectrumId;
-      if (!waferId || !spectrumId) return;
-      if (!store[waferId]) {
-        store[waferId] = {};
-      }
-      store[waferId][spectrumId] = {
-        seFilename: item.seFilename || "",
-        srFilename: item.srFilename || "",
-        combineFilename: item.combineFilename || "",
-        seMeta: item.seMetaInfo || {},
-        srMeta: item.srMetaInfo || {},
-        se: {
-          wavelength: item.se?.wavelength || [],
-          n: item.se?.n || [],
-          c: item.se?.c || [],
-          s: item.se?.s || []
-        },
-        sr: {
-          wavelength: item.sr?.wavelength || [],
-          te: item.sr?.te || [],
-          tm: item.sr?.tm || []
-        },
-        path: item.sourcePath || ""
-      };
-      spectrumTable.push({
-        waferId,
-        spectrumId,
-        path: item.sourcePath || "",
-        seFilename: item.seFilename || "",
-        srFilename: item.srFilename || "",
-        combineFilename: item.combineFilename || ""
+    const stopProgressTicker = startWaferProgressTicker(rows.length);
+    try {
+      const response = await fetch(`${SPECTRUM_API_BASE}/get_spectra`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          measure_pos: measurePos,
+          wafer_info_list: rows.map((row) => ({
+            tool: row.tool,
+            recipe: row.recipeName,
+            lot: row.lotId || "",
+            wafer: row.waferId,
+            file_path: row.spectrumFolder,
+            record_id: row._recordId || row.id || row.record_id || row.recordId || ""
+          }))
+        })
       });
-      loaded += 1;
-      if (expectedCount > 0) {
-        setLoadingProgress(Math.round((loaded / expectedCount) * 100));
+      if (!response.ok) {
+        throw new Error("Failed to load spectra via API");
       }
-    });
-    const traces = buildTracesFromStore(store, plotChannelMode);
-    return { traces, store, spectrumTable };
+      const data = await response.json();
+      const loadedSpectra = normalizeLoadedSpectra(data);
+      loadedSpectra.forEach((item) => {
+        const waferId = item.waferId;
+        const spectrumId = item.spectrumId;
+        if (!waferId || !spectrumId) return;
+        if (!store[waferId]) {
+          store[waferId] = {};
+        }
+        store[waferId][spectrumId] = {
+          seFilename: item.seFilename || "",
+          srFilename: item.srFilename || "",
+          combineFilename: item.combineFilename || "",
+          seMeta: item.seMetaInfo || {},
+          srMeta: item.srMetaInfo || {},
+          se: {
+            wavelength: item.se?.wavelength || [],
+            n: item.se?.n || [],
+            c: item.se?.c || [],
+            s: item.se?.s || []
+          },
+          sr: {
+            wavelength: item.sr?.wavelength || [],
+            te: item.sr?.te || [],
+            tm: item.sr?.tm || []
+          },
+          path: item.sourcePath || ""
+        };
+        spectrumTable.push({
+          waferId,
+          spectrumId,
+          path: item.sourcePath || "",
+          seFilename: item.seFilename || "",
+          srFilename: item.srFilename || "",
+          combineFilename: item.combineFilename || ""
+        });
+      });
+      setLoadingProgress(100);
+      const traces = buildTracesFromStore(store, plotChannelMode);
+      return { traces, store, spectrumTable };
+    } finally {
+      stopProgressTicker();
+    }
   };
 
   const handleImport = async () => {
@@ -417,14 +438,16 @@ export default function Spectrum({ workspaceId }) {
       setSelectedSpectrumTable(spectrumTable);
       setOriginalSpectrumTable(spectrumTable);
       setImportedObjectRows(chosen);
-      setSpectrumRuntimeCache(workspaceId, {
+      const runtimeSnapshot = {
         measurePosition,
         objectRows: chosen,
         store,
         originalStore: store,
         spectrumTable,
         originalSpectrumTable: spectrumTable
-      });
+      };
+      setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
+      persistIndexedRuntime(runtimeSnapshot);
       const nextSelection = {
         workspaceId,
         waferIds: Array.from(new Set(chosen.map((item) => item.waferId))),
@@ -439,18 +462,6 @@ export default function Spectrum({ workspaceId }) {
         showPlot: true
       };
       setSpectrumSelection(nextSelection);
-      await persistWorkspaceSpectrumCache({
-        viewer: buildViewerSnapshot(chosen),
-        selection: nextSelection,
-        runtime: {
-          measurePosition,
-          objectRows: chosen,
-          store,
-          originalStore: store,
-          spectrumTable,
-          originalSpectrumTable: spectrumTable
-        }
-      });
       setShowPlot(true);
     } catch (error) {
       setImportError("Failed to load spectra. Please try again.");
@@ -764,6 +775,7 @@ export default function Spectrum({ workspaceId }) {
 
       if (!allowAutoRestore) {
         clearSpectrumRuntimeCache(workspaceId);
+        void clearRuntimeFromIndexedDb("spectrum", workspaceId);
         setShowPlot(false);
         setPlotData([]);
         setOriginalPlotData([]);
@@ -781,7 +793,11 @@ export default function Spectrum({ workspaceId }) {
       }
 
       const restoredMode = saved.plotChannelMode || "SE";
-      const runtime = getSpectrumRuntimeCache(workspaceId) || persistedRuntime || null;
+      const memoryRuntime = getSpectrumRuntimeCache(workspaceId);
+      const indexedRuntime =
+        memoryRuntime || persistedRuntime ? null : await loadRuntimeFromIndexedDb("spectrum", workspaceId);
+      if (cancelled) return;
+      const runtime = memoryRuntime || persistedRuntime || indexedRuntime || null;
       if (runtime) {
         const selectedTable = savedSelectedTable.length
           ? savedSelectedTable
@@ -791,6 +807,7 @@ export default function Spectrum({ workspaceId }) {
           selectedTable
         );
         setSpectrumRuntimeCache(workspaceId, runtime);
+        persistIndexedRuntime(runtime);
         setOriginalPlotData(buildTracesFromStore(runtime.originalStore || {}, restoredMode));
         setOriginalSpectraStore(runtime.originalStore || {});
         setOriginalSpectrumTable(runtime.originalSpectrumTable || []);
@@ -819,14 +836,16 @@ export default function Spectrum({ workspaceId }) {
         setPlotData(buildTracesFromStore(picked.store, restoredMode));
         setSpectraStore(picked.store);
         setSelectedSpectrumTable(picked.spectrumTable);
-        setSpectrumRuntimeCache(workspaceId, {
+        const runtimeSnapshot = {
           measurePosition: saved.measurePosition || savedSelection?.measurePosition || "T1",
           objectRows: savedObjectRows,
           store: picked.store,
           originalStore: store,
           spectrumTable: picked.spectrumTable,
           originalSpectrumTable: spectrumTable
-        });
+        };
+        setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
+        persistIndexedRuntime(runtimeSnapshot);
         setShowPlot(true);
       } catch (error) {
         if (!cancelled) {
@@ -1080,18 +1099,6 @@ export default function Spectrum({ workspaceId }) {
         showPlot: showPlot && next.length > 0
       };
       setSpectrumSelection(nextSelection);
-      persistWorkspaceSpectrumCache({
-        viewer: buildViewerSnapshot(importedObjectRows),
-        selection: nextSelection,
-        runtime: {
-          measurePosition,
-          objectRows: importedObjectRows,
-          store: nextStore,
-          originalStore: originalSpectraStore,
-          spectrumTable: next,
-          originalSpectrumTable
-        }
-      });
       return next;
     });
     setHighlightSelections((prev) => {
@@ -1110,14 +1117,16 @@ export default function Spectrum({ workspaceId }) {
       prev.filter((row) => !outlierSet.has(`${row.waferId}::${row.spectrumId}`))
     );
     setOutliers([]);
-    setSpectrumRuntimeCache(workspaceId, {
+    const runtimeSnapshot = {
       measurePosition,
       objectRows: importedObjectRows,
       store: nextStore,
       originalStore: originalSpectraStore,
       spectrumTable: nextSelectedTable,
       originalSpectrumTable
-    });
+    };
+    setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
+    persistIndexedRuntime(runtimeSnapshot);
   };
 
   const reloadOriginalSpectra = () => {
@@ -1144,26 +1153,16 @@ export default function Spectrum({ workspaceId }) {
       showPlot: showPlot && originalSpectrumTable.length > 0
     };
     setSpectrumSelection(nextSelection);
-    setSpectrumRuntimeCache(workspaceId, {
+    const runtimeSnapshot = {
       measurePosition,
       objectRows: importedObjectRows,
       store: originalSpectraStore,
       originalStore: originalSpectraStore,
       spectrumTable: originalSpectrumTable,
       originalSpectrumTable
-    });
-    persistWorkspaceSpectrumCache({
-      viewer: buildViewerSnapshot(importedObjectRows),
-      selection: nextSelection,
-      runtime: {
-        measurePosition,
-        objectRows: importedObjectRows,
-        store: originalSpectraStore,
-        originalStore: originalSpectraStore,
-        spectrumTable: originalSpectrumTable,
-        originalSpectrumTable
-      }
-    });
+    };
+    setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
+    persistIndexedRuntime(runtimeSnapshot);
   };
 
   const handleSaveStep = async () => {
@@ -1199,14 +1198,16 @@ export default function Spectrum({ workspaceId }) {
     };
 
     setSpectrumSelection(selectionPayload);
-    setSpectrumRuntimeCache(workspaceId, {
+    const runtimeSnapshot = {
       measurePosition,
       objectRows,
       store: spectraStore,
       originalStore: originalSpectraStore,
       spectrumTable: selectedSpectrumTable,
       originalSpectrumTable
-    });
+    };
+    setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
+    persistIndexedRuntime(runtimeSnapshot);
     const existing = loadRecipeSchema(workspaceId) || {};
     saveRecipeSchema(workspaceId, {
       ...existing,
@@ -1216,7 +1217,7 @@ export default function Spectrum({ workspaceId }) {
         spectrumSelection: selectionPayload
       }
     });
-    await persistWorkspaceSpectrumCache({
+    persistWorkspaceSpectrumCache({
       viewer: buildViewerSnapshot(objectRows),
       selection: selectionPayload,
       runtime: {

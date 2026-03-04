@@ -32,7 +32,6 @@ export const workspaceNavSections = [
         items: [
           { label: "Spectrum", path: "/spectrum-analysis/spectrum" },
           { label: "Sensitivity", path: "/spectrum-analysis/sensitivity" },
-          { label: "TEM Selection", path: "/spectrum-analysis/slice-selection" },
           { label: "Precision", path: "/spectrum-analysis/precision" }
         ]
       },

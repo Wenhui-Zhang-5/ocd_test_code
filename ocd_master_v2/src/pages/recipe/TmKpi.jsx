@@ -30,10 +30,11 @@ export default function TmKpi({ workspaceId }) {
     return waferPool.includes(value) ? value : waferPool[0];
   };
   const resolveSpectrumName = (item, currentSpecType) => {
-    if (currentSpecType === "SR") {
+    const normalizedMode = String(currentSpecType || "SE").trim().toUpperCase();
+    if (normalizedMode === "SR") {
       return item?.srFilename || item?.sr_filename || item?.spectrumId || "";
     }
-    if (currentSpecType === "Combine") {
+    if (normalizedMode === "COMBINE") {
       return (
         item?.combineFilename ||
         item?.combine_filename ||
@@ -136,8 +137,10 @@ export default function TmKpi({ workspaceId }) {
   useEffect(() => {
     if (!workspaceId) return;
     const schema = loadRecipeSchema(workspaceId);
+    const schemaSpectrumSelection = schema?.spectrumAnalysis?.spectrumSelection || {};
+    const runtimeSpectrumSelection = getSpectrumSelection(workspaceId) || {};
     const spectrumSelection =
-      schema?.spectrumAnalysis?.spectrumSelection || getSpectrumSelection(workspaceId) || {};
+      (schemaSpectrumSelection?.selectedSpectra?.length ? schemaSpectrumSelection : runtimeSpectrumSelection) || {};
     const basisNames = (schema?.model?.basisRows || [])
       .map((row) => row?.name)
       .filter(Boolean);
@@ -152,7 +155,9 @@ export default function TmKpi({ workspaceId }) {
         : schema?.waferIds?.length
           ? schema.waferIds
           : [];
-    const selectedSpectra = spectrumSelection?.selectedSpectra || [];
+    const selectedSpectra = spectrumSelection?.selectedSpectra?.length
+      ? spectrumSelection.selectedSpectra
+      : (schema?.spectrumAnalysis?.spectrumViewer?.selectedSpectrumTable || []);
     const nextSpectrumOptionsByWafer = {};
     selectedSpectra.forEach((item) => {
       const waferId = item?.waferId;
@@ -167,7 +172,11 @@ export default function TmKpi({ workspaceId }) {
       }
     });
     setSpectrumOptionsByWafer(nextSpectrumOptionsByWafer);
-    setConfirmedFittingWafers(Array.from(new Set((confirmedWafers || []).filter(Boolean))));
+    const wafersFromSpectra = Object.keys(nextSpectrumOptionsByWafer);
+    const fallbackWafers = spectrumSelection?.waferIds || [];
+    setConfirmedFittingWafers(
+      Array.from(new Set([...(confirmedWafers || []), ...fallbackWafers, ...wafersFromSpectra].filter(Boolean)))
+    );
     setBasisCdNames(basisNames);
     const defaultBasisColumns = basisNames.slice(0, 2);
     const nextCdColumns = schema?.tem?.cdColumns?.length

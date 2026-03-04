@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import WorkflowFooter from "../../components/WorkflowFooter.jsx";
 import { fetchNkMaterialOrder, loadRecipeSchema, saveRecipeSchema } from "../../data/mockApi.js";
 import { isWorkspaceReadOnly } from "../../data/workspaceAccess.js";
@@ -115,6 +115,7 @@ export default function FittingStrategy({ workspaceId }) {
   const [materials, setMaterials] = useState([]);
   const [selectedMaterial, setSelectedMaterial] = useState(null);
   const [materialData, setMaterialData] = useState({});
+  const [materialConfigs, setMaterialConfigs] = useState({});
   const [mode, setMode] = useState("column");
   const [dragIndex, setDragIndex] = useState(null);
   const [customSteps, setCustomSteps] = useState([
@@ -132,6 +133,7 @@ export default function FittingStrategy({ workspaceId }) {
   const [fittingIteration, setFittingIteration] = useState(1);
   const [linearIteration, setLinearIteration] = useState(2);
   const [estimatedTime, setEstimatedTime] = useState("2h 10m");
+  const syncingConfigRef = useRef(false);
   const selectedMeta = selectedMaterial ? materialData[selectedMaterial.name] : null;
   const tableColumns = selectedMeta?.type === "Cauchy" ? cauchyColumns : hoColumns;
   const rowCount = selectedMeta?.type === "Cauchy" ? 1 : selectedMeta?.oscillators || 1;
@@ -173,7 +175,35 @@ export default function FittingStrategy({ workspaceId }) {
     let list = Object.values(map);
     const materialFloatMap = schema?.startingPoint?.materialFloatMap || {};
     list = list.filter((item) => Boolean(materialFloatMap[item.name]));
-    const saved = schema?.fittingStrategy?.materialOrder;
+    const savedStrategy = schema?.fittingStrategy || {};
+    const saved = savedStrategy?.materialOrder;
+    const defaultMode = savedStrategy.mode || "column";
+    const defaultCustomSteps =
+      Array.isArray(savedStrategy.customSteps) && savedStrategy.customSteps.length
+        ? savedStrategy.customSteps
+        : [{ name: "Step 1", cells: [] }];
+    const defaultActiveStepIndex =
+      typeof savedStrategy.activeStepIndex === "number" ? savedStrategy.activeStepIndex : 0;
+    const savedConfigs = savedStrategy?.materialConfigs || {};
+    const savedConfirmed = new Set(savedStrategy?.confirmedMaterials || []);
+    const buildInitialConfigs = (list) =>
+      list.reduce((acc, item) => {
+        const cfg = savedConfigs[item.name] || {};
+        const cfgMode = cfg.mode || defaultMode;
+        const cfgSteps =
+          Array.isArray(cfg.customSteps) && cfg.customSteps.length ? cfg.customSteps : defaultCustomSteps;
+        const cfgStepIndex =
+          typeof cfg.activeStepIndex === "number"
+            ? Math.max(0, Math.min(cfg.activeStepIndex, cfgSteps.length - 1))
+            : Math.max(0, Math.min(defaultActiveStepIndex, cfgSteps.length - 1));
+        acc[item.name] = {
+          mode: cfgMode,
+          customSteps: cfgSteps,
+          activeStepIndex: cfgStepIndex,
+          confirmed: Boolean(savedConfirmed.has(item.name) || cfg.confirmed)
+        };
+        return acc;
+      }, {});
     if (saved && saved.length) {
       const savedMap = saved.reduce((acc, name, idx) => {
         acc[name] = idx;
@@ -188,6 +218,7 @@ export default function FittingStrategy({ workspaceId }) {
         return aIdx - bIdx;
       });
       setMaterials(list);
+      setMaterialConfigs(buildInitialConfigs(list));
       if (!list.length) {
         setSelectedMaterial(null);
       } else if (!selectedMaterial || !list.some((item) => item.name === selectedMaterial.name)) {
@@ -207,6 +238,7 @@ export default function FittingStrategy({ workspaceId }) {
           return aIdx - bIdx;
         });
         setMaterials(sorted);
+        setMaterialConfigs(buildInitialConfigs(sorted));
         if (!sorted.length) {
           setSelectedMaterial(null);
         } else if (!selectedMaterial || !sorted.some((item) => item.name === selectedMaterial.name)) {
@@ -222,9 +254,6 @@ export default function FittingStrategy({ workspaceId }) {
     const schema = loadRecipeSchema(workspaceId);
     const saved = schema?.fittingStrategy;
     if (!saved) return;
-    if (saved.mode) setMode(saved.mode);
-    if (Array.isArray(saved.customSteps)) setCustomSteps(saved.customSteps);
-    if (typeof saved.activeStepIndex === "number") setActiveStepIndex(saved.activeStepIndex);
     if (saved.globalSettings) {
       const settings = saved.globalSettings;
       if (settings.enableSensitivity !== undefined) setEnableSensitivity(settings.enableSensitivity);
@@ -239,6 +268,53 @@ export default function FittingStrategy({ workspaceId }) {
       if (settings.estimatedTime !== undefined) setEstimatedTime(String(settings.estimatedTime));
     }
   }, [workspaceId]);
+
+  useEffect(() => {
+    const materialName = selectedMaterial?.name;
+    if (!materialName) return;
+    const cfg = materialConfigs[materialName];
+    if (!cfg) return;
+    const cfgSteps =
+      Array.isArray(cfg.customSteps) && cfg.customSteps.length ? cfg.customSteps : [{ name: "Step 1", cells: [] }];
+    const cfgStepIndex = Math.max(0, Math.min(cfg.activeStepIndex || 0, cfgSteps.length - 1));
+    syncingConfigRef.current = true;
+    setMode(cfg.mode || "column");
+    setCustomSteps(cfgSteps);
+    setActiveStepIndex(cfgStepIndex);
+    queueMicrotask(() => {
+      syncingConfigRef.current = false;
+    });
+  }, [selectedMaterial, materialConfigs]);
+
+  useEffect(() => {
+    const materialName = selectedMaterial?.name;
+    if (!materialName || syncingConfigRef.current) return;
+    const nextSteps =
+      Array.isArray(customSteps) && customSteps.length ? customSteps : [{ name: "Step 1", cells: [] }];
+    const nextStepIndex = Math.max(0, Math.min(activeStepIndex || 0, nextSteps.length - 1));
+    setMaterialConfigs((prev) => {
+      const current = prev[materialName] || {
+        mode: "column",
+        customSteps: [{ name: "Step 1", cells: [] }],
+        activeStepIndex: 0,
+        confirmed: false
+      };
+      const currentStepsJson = JSON.stringify(current.customSteps || []);
+      const nextStepsJson = JSON.stringify(nextSteps);
+      const changed =
+        current.mode !== mode || current.activeStepIndex !== nextStepIndex || currentStepsJson !== nextStepsJson;
+      if (!changed) return prev;
+      return {
+        ...prev,
+        [materialName]: {
+          mode,
+          customSteps: nextSteps,
+          activeStepIndex: nextStepIndex,
+          confirmed: false
+        }
+      };
+    });
+  }, [selectedMaterial, mode, customSteps, activeStepIndex]);
 
   const handleDrop = (targetIndex) => {
     if (dragIndex === null || dragIndex === targetIndex) {
@@ -285,24 +361,35 @@ export default function FittingStrategy({ workspaceId }) {
     );
   };
 
-  const handleSaveStep = () => {
+  const saveFittingStrategy = (configs = materialConfigs) => {
     if (!workspaceId) return;
+    const confirmedMaterials = materials
+      .filter((item) => Boolean(configs[item.name]?.confirmed))
+      .map((item) => item.name);
     const executionStepsByMaterial = materials.reduce((acc, material) => {
-      const isSelectedMaterial = selectedMaterial?.name === material.name;
+      const cfg = configs[material.name] || {
+        mode: "column",
+        customSteps: [{ name: "Step 1", cells: [] }],
+        activeStepIndex: 0
+      };
       acc[material.name] = buildOscillatorExecutionSteps({
         material,
-        mode,
-        customSteps,
-        useCustomSteps: mode === "custom" && isSelectedMaterial
+        mode: cfg.mode,
+        customSteps: cfg.customSteps,
+        useCustomSteps: cfg.mode === "custom"
       });
       return acc;
     }, {});
+    const activeMaterialName = selectedMaterial?.name;
+    const activeCfg = activeMaterialName ? configs[activeMaterialName] : null;
     saveRecipeSchema(workspaceId, {
       fittingStrategy: {
         materialOrder: materials.map((item) => item.name),
-        mode,
-        customSteps,
-        activeStepIndex,
+        mode: activeCfg?.mode || mode,
+        customSteps: activeCfg?.customSteps || customSteps,
+        activeStepIndex: activeCfg?.activeStepIndex ?? activeStepIndex,
+        materialConfigs: configs,
+        confirmedMaterials,
         executionStepsByMaterial,
         globalSettings: {
           enableSensitivity,
@@ -320,9 +407,42 @@ export default function FittingStrategy({ workspaceId }) {
     });
   };
 
+  const unconfirmedMaterials = useMemo(
+    () => materials.filter((item) => !materialConfigs[item.name]?.confirmed).map((item) => item.name),
+    [materials, materialConfigs]
+  );
+
+  const handleSaveStep = () => {
+    if (unconfirmedMaterials.length) {
+      setIterationNotice(`Please confirm iteration order for: ${unconfirmedMaterials.join(", ")}`);
+      return false;
+    }
+    saveFittingStrategy(materialConfigs);
+    return true;
+  };
+
   const handleConfirmIterationOrder = () => {
-    handleSaveStep();
-    setIterationNotice("Iteration order saved.");
+    const materialName = selectedMaterial?.name;
+    if (!materialName) return;
+    const current = materialConfigs[materialName] || {
+      mode,
+      customSteps,
+      activeStepIndex,
+      confirmed: false
+    };
+    const nextConfigs = {
+      ...materialConfigs,
+      [materialName]: {
+        ...current,
+        mode,
+        customSteps,
+        activeStepIndex,
+        confirmed: true
+      }
+    };
+    setMaterialConfigs(nextConfigs);
+    saveFittingStrategy(nextConfigs);
+    setIterationNotice(`${materialName} iteration order saved.`);
   };
 
   useEffect(() => {
@@ -357,6 +477,7 @@ export default function FittingStrategy({ workspaceId }) {
             >
               <span className="drag-handle">::</span>
               <span>{index + 1}. {item.name}</span>
+              <span className="subtle">{materialConfigs[item.name]?.confirmed ? "Saved" : "Pending"}</span>
             </button>
           ))}
         </div>
@@ -367,6 +488,10 @@ export default function FittingStrategy({ workspaceId }) {
           <h3>Select Iteration Order</h3>
           {selectedMaterial ? <span className="chip">{selectedMaterial.name}</span> : null}
         </div>
+        <p className="panel-note">
+          Confirmed {materials.length - unconfirmedMaterials.length}/{materials.length}
+          {unconfirmedMaterials.length ? ` · Pending: ${unconfirmedMaterials.join(", ")}` : " · All materials saved"}
+        </p>
         <div className="inline-actions">
           <button className={mode === "column" ? "primary-button" : "ghost-button"} onClick={() => setMode("column")}>
             By Column

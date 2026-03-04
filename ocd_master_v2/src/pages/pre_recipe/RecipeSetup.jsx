@@ -8,6 +8,7 @@ import {
   fetchModelExists,
   fetchRecipeHubMetaOptions,
   getPrecisionSelection,
+  listModelHub,
   getSpectrumSelection,
   loadRecipeSchema,
   saveRecipeSchema
@@ -26,7 +27,7 @@ export default function RecipeSetup({ workspaceId }) {
     recipeName: "New Recipe",
     layout: "Default",
     state: "draft",
-    version: "v1",
+    version: "1",
     templateEnabled: false,
     templateId: ""
   });
@@ -53,6 +54,13 @@ export default function RecipeSetup({ workspaceId }) {
   const [validatingModelId, setValidatingModelId] = useState(false);
   const [modelIdMessage, setModelIdMessage] = useState("");
   const restoringRef = useRef(false);
+  const lastPersistedWorkspaceIdRef = useRef("");
+  const normalizeVersionValue = (value) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return "";
+    const digits = raw.replace(/\D/g, "");
+    return digits;
+  };
   const spectrumSelection = getSpectrumSelection(workspaceId);
   const availableWafers = useMemo(
     () => (spectrumSelection?.waferIds?.length ? spectrumSelection.waferIds : []),
@@ -147,7 +155,7 @@ export default function RecipeSetup({ workspaceId }) {
         recipeName: schema.recipeName || prev.recipeName,
         layout: schema.layout || prev.layout,
         state: schema.state || prev.state,
-        version: schema.version || prev.version
+        version: normalizeVersionValue(schema.version) || prev.version
       }));
       setModelIdValidated(restoredValidated);
       setModelIdMessage(restoredValidated ? "Model ID validated." : "");
@@ -315,6 +323,11 @@ export default function RecipeSetup({ workspaceId }) {
     }
   };
 
+  const handleVersionChange = (event) => {
+    const value = normalizeVersionValue(event.target.value);
+    setForm((prev) => ({ ...prev, version: value }));
+  };
+
   const validateModelId = async () => {
     const modelID = String(form.modelID || "").trim();
     if (!modelID) {
@@ -335,6 +348,7 @@ export default function RecipeSetup({ workspaceId }) {
       setModelIdMessage("Model ID validated.");
       saveRecipeSchema(workspaceId, {
         modelID,
+        version: normalizeVersionValue(form.version),
         preRecipe: {
           recipeSetupModelValidation: {
             modelID,
@@ -351,6 +365,32 @@ export default function RecipeSetup({ workspaceId }) {
     } finally {
       setValidatingModelId(false);
     }
+  };
+
+  const validateUniqueModelVersion = () => {
+    const modelID = String(form.modelID || "").trim();
+    const versionValue = normalizeVersionValue(form.version);
+    if (!modelID) {
+      window.alert("Model ID is required.");
+      return false;
+    }
+    if (!versionValue) {
+      window.alert("Version must be a numeric value.");
+      return false;
+    }
+    const hasConflict = listModelHub().some((item) => {
+      if (!item || String(item.id || "") === String(workspaceId || "")) {
+        return false;
+      }
+      const itemModel = String(item.modelID || "").trim().toLowerCase();
+      const itemVersion = normalizeVersionValue(item.version).toLowerCase();
+      return itemModel === modelID.toLowerCase() && itemVersion === versionValue.toLowerCase();
+    });
+    if (hasConflict) {
+      window.alert(`Model ID "${modelID}" with version "${versionValue}" already exists.`);
+      return false;
+    }
+    return true;
   };
 
   const normalizeText = (value) => (value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -471,6 +511,7 @@ export default function RecipeSetup({ workspaceId }) {
   const persistRecipeSetup = () => {
     const payload = {
       ...form,
+      version: normalizeVersionValue(form.version),
       waferIds: selectedWafers,
       baselineWafer: activeBaselineWafer,
       baselineSpectrum,
@@ -557,7 +598,7 @@ export default function RecipeSetup({ workspaceId }) {
       setCopyProgress(10);
       const requestPayload = {
         model_id: modelID,
-        version: form.version || "v0",
+        version: normalizeVersionValue(form.version) || "0",
         spec_type: specType,
         fitting_measure_pos: fittingMeasurePos,
         fitting_wafer_ids: selectedWafers,
@@ -636,15 +677,20 @@ export default function RecipeSetup({ workspaceId }) {
     }
   };
 
-  const handleSaveSetup = () => {
+  const handleSaveSetup = async () => {
+    if (!validateUniqueModelVersion()) {
+      return false;
+    }
     const nextId = persistRecipeSetup();
+    lastPersistedWorkspaceIdRef.current = nextId || "";
     if (workspaceId === "temp" && nextId && nextId !== "temp") {
       window.location.hash = buildHashHref(`/ocd/workspace/${nextId}/pre-recipe/recipe-setup`);
     }
+    return true;
   };
 
   const handleNextStep = () => {
-    const nextId = persistRecipeSetup();
+    const nextId = lastPersistedWorkspaceIdRef.current || workspaceId;
     if (nextId) {
       window.location.hash = buildHashHref(`/ocd/workspace/${nextId}/pre-recipe/model`);
     }
@@ -689,7 +735,12 @@ export default function RecipeSetup({ workspaceId }) {
               <button
                 className="ghost-button"
                 type="button"
-                disabled={readOnly || modelIdValidated || validatingModelId || !String(form.modelID || "").trim()}
+                disabled={
+                  readOnly ||
+                  modelIdValidated ||
+                  validatingModelId ||
+                  !String(form.modelID || "").trim()
+                }
                 onClick={() => {
                   void validateModelId();
                 }}
@@ -813,10 +864,14 @@ export default function RecipeSetup({ workspaceId }) {
           <div className="form-row">
             <label>Version</label>
             <input
-              type="text"
+              type="number"
               value={form.version}
-              onChange={handleChange("version")}
-              disabled={Boolean(workspaceId && workspaceId !== "temp") || readOnly}
+              onChange={handleVersionChange}
+              min="0"
+              step="1"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              disabled={readOnly}
             />
           </div>
         </div>

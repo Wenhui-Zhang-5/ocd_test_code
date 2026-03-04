@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import os
 import random
 import sqlite3
 import statistics
@@ -27,6 +28,12 @@ TOOLS = ["TOOL-A01", "TOOL-A02", "TOOL-B01", "TOOL-C01"]
 RECIPES = ["RCP-ALD-01", "RCP-ALD-02", "RCP-ETCH-03", "RCP-CMP-01"]
 LOTS = ["LOT-2401", "LOT-2402", "LOT-2403", "LOT-2404", "LOT-2405"]
 FAKE_LOAD_DELAY_SECONDS = 3.0
+AUTO_SEED_SPECTRUM_OBJECTS = str(os.getenv("OCD_SPECTRUM_AUTO_SEED", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 class SpectrumRecord(BaseModel):
@@ -337,7 +344,7 @@ def _init_db() -> sqlite3.Connection:
         """
     )
     count = conn.execute("SELECT COUNT(1) FROM spectrum_objects").fetchone()[0]
-    if count == 0:
+    if count == 0 and AUTO_SEED_SPECTRUM_OBJECTS:
         rows = _build_fake_rows()
         if rows:
             conn.executemany(

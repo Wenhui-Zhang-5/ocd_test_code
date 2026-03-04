@@ -11,8 +11,6 @@ export default function Model({ workspaceId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [modelJson, setModelJson] = useState(null);
-  const [templateEnabled, setTemplateEnabled] = useState(false);
-  const [templateId, setTemplateId] = useState("");
   const [basisRows, setBasisRows] = useState([]);
   const [constraintRows, setConstraintRows] = useState([]);
   const [materialSummary, setMaterialSummary] = useState({
@@ -51,10 +49,6 @@ export default function Model({ workspaceId }) {
     if (schema?.model?.basisRows) setBasisRows(schema.model.basisRows);
     if (schema?.model?.constraintRows) setConstraintRows(schema.model.constraintRows);
     if (schema?.model?.materialSummary) setMaterialSummary(schema.model.materialSummary);
-    if (schema?.model?.templateEnabled !== undefined) {
-      setTemplateEnabled(schema.model.templateEnabled);
-      setTemplateId(schema.model.templateId || "");
-    }
     if (
       schema?.model?.modelJson ||
       (schema?.model?.basisRows && schema.model.basisRows.length) ||
@@ -88,15 +82,9 @@ export default function Model({ workspaceId }) {
         };
       });
       const constraints = (content.constraint || []).map((item) => {
-        const nominal = item.nominal ?? "";
-        const min = item.min ?? (nominal !== "" ? (Number(nominal) * 0.9).toFixed(2) : "");
-        const max = item.max ?? (nominal !== "" ? (Number(nominal) * 1.1).toFixed(2) : "");
         return {
           name: item.alias || item.name || "",
-          customName: item.equation || item.custom_name || item.customName || "",
-          nominal,
-          min,
-          max
+          customName: item.equation || item.custom_name || item.customName || ""
         };
       });
       const materials = Array.from(
@@ -197,8 +185,6 @@ export default function Model({ workspaceId }) {
         modelJson,
         basisRows,
         constraintRows,
-        templateEnabled,
-        templateId,
         materialSummary
       }
     });
@@ -292,17 +278,11 @@ export default function Model({ workspaceId }) {
               <div className="table-row table-head">
                 <span>Name</span>
                 <span>Custom Name</span>
-                <span>Nominal</span>
-                <span>Min</span>
-                <span>Max</span>
               </div>
               {constraintRows.map((row, index) => (
                 <div className="table-row" key={`constraint-${index}`}>
                   <input value={row.name} disabled />
                   <input value={row.customName} disabled />
-                  <input value={row.nominal} disabled />
-                  <input value={row.min} disabled />
-                  <input value={row.max} disabled />
                 </div>
               ))}
             </div>
@@ -377,32 +357,6 @@ export default function Model({ workspaceId }) {
             </div>
           </section>
 
-          <section className="panel">
-            <div className="panel-header">
-              <h3>Template Settings</h3>
-            </div>
-            <div className="form-grid two-col">
-              <div className="form-row">
-                <label>Template Enabled</label>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={templateEnabled}
-                    onChange={(event) => setTemplateEnabled(event.target.checked)}
-                  />
-                  <span className="slider" />
-                </label>
-              </div>
-              <div className="form-row">
-                <label>Template ID</label>
-                <input
-                  type="text"
-                  value={templateId}
-                  onChange={(event) => setTemplateId(event.target.value)}
-                />
-              </div>
-            </div>
-          </section>
         </>
       ) : (
         <section className="panel">

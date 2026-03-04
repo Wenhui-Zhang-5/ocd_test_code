@@ -1,7 +1,6 @@
 export const workflowSteps = [
   "/spectrum-analysis/spectrum",
   "/spectrum-analysis/sensitivity",
-  "/spectrum-analysis/slice-selection",
   "/spectrum-analysis/precision",
   "/pre-recipe/recipe-setup",
   "/pre-recipe/model",
