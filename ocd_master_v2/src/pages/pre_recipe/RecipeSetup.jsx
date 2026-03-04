@@ -497,14 +497,14 @@ export default function RecipeSetup({ workspaceId }) {
     }
     const tempSchema = loadRecipeSchema(workspaceId) || {};
     const workspace = createModelWorkspace(payload);
-    const existing = loadRecipeSchema(workspace.modelID) || {};
-    saveRecipeSchema(workspace.modelID, {
+    const existing = loadRecipeSchema(workspace.id) || {};
+    saveRecipeSchema(workspace.id, {
       ...tempSchema,
       ...existing,
       ...payload,
       modelID: workspace.modelID
     });
-    return workspace.modelID;
+    return workspace.id;
   };
 
   const executeCopyTo58 = async () => {

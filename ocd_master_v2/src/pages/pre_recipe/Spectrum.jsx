@@ -1166,7 +1166,7 @@ export default function Spectrum({ workspaceId }) {
     });
   };
 
-  const handleSaveStep = () => {
+  const handleSaveStep = async () => {
     setImportError("");
     const selectedSet = new Set(
       selectedSpectrumTable.map((row) => `${row.waferId}::${row.spectrumId}`)
@@ -1216,7 +1216,7 @@ export default function Spectrum({ workspaceId }) {
         spectrumSelection: selectionPayload
       }
     });
-    persistWorkspaceSpectrumCache({
+    await persistWorkspaceSpectrumCache({
       viewer: buildViewerSnapshot(objectRows),
       selection: selectionPayload,
       runtime: {

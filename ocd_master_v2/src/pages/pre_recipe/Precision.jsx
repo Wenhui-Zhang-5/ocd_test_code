@@ -1237,7 +1237,7 @@ export default function Precision({ workspaceId }) {
     }
   });
 
-  const handleSaveStep = () => {
+  const handleSaveStep = async () => {
     if (!workspaceId) return;
     const isTempWorkspace = workspaceId === "temp";
     const objectRows = importedObjectRows.length
@@ -1278,7 +1278,7 @@ export default function Precision({ workspaceId }) {
     setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
     if (!isTempWorkspace) {
       saveRecipeSchema(workspaceId, buildPrecisionPayload());
-      persistWorkspacePrecisionCache({
+      await persistWorkspacePrecisionCache({
         selection: selectionPayload,
         runtime: runtimeSnapshot
       });
@@ -1286,9 +1286,8 @@ export default function Precision({ workspaceId }) {
     return true;
   };
 
-  const handleNextStep = () => {
+  const handleNextStep = async () => {
     if (workspaceId && workspaceId !== "temp") {
-      handleSaveStep();
       window.location.hash = buildHashHref(`/ocd/workspace/${workspaceId}/pre-recipe/recipe-setup`);
       return;
     }
@@ -1336,7 +1335,7 @@ export default function Precision({ workspaceId }) {
           version: finalVersion
         });
 
-        const promotedWorkspaceId = workspace.modelID;
+        const promotedWorkspaceId = workspace.id;
         const spectrumSelection = getSpectrumSelection(workspaceId);
         if (spectrumSelection && (!spectrumSelection.workspaceId || spectrumSelection.workspaceId === "temp")) {
           const promotedSpectrumSelection = {
@@ -1394,14 +1393,14 @@ export default function Precision({ workspaceId }) {
           runtime: promotedPrecisionRuntime
         });
 
-        saveRecipeSchema(workspace.modelID, buildPrecisionPayload(workspace.modelID));
+        saveRecipeSchema(workspace.id, buildPrecisionPayload(workspace.modelID));
         await saveWorkspaceCaseCacheSection(promotedWorkspaceId, "schema", {
           recipeSchema: loadRecipeSchema(promotedWorkspaceId) || {}
         });
-        window.location.hash = buildHashHref(`/ocd/workspace/${workspace.modelID}/pre-recipe/recipe-setup`);
+        window.location.hash = buildHashHref(`/ocd/workspace/${workspace.id}/pre-recipe/recipe-setup`);
         return;
       }
-      handleSaveStep();
+      await handleSaveStep();
       window.location.hash = buildHashHref(`/ocd/workspace/${workspaceId}/pre-recipe/recipe-setup`);
     } finally {
       setCreatingRecipe(false);
@@ -1688,13 +1687,13 @@ export default function Precision({ workspaceId }) {
               {summaryRows.map((row) => (
                 <div className="table-row" key={row.point}>
                   <span>{formatPointLabel(row.point)}</span>
-                  <span>{row.std.toFixed(2)}%</span>
+                  <span>{row.std.toFixed(6)}</span>
                 </div>
               ))}
             </div>
             {maxStdPoint ? (
               <p className="panel-note">
-                Max STD point: {formatPointLabel(maxStdPoint.point)} (Std {maxStdPoint.std.toFixed(2)}%)
+                Max STD point: {formatPointLabel(maxStdPoint.point)} (Std {maxStdPoint.std.toFixed(6)})
               </p>
             ) : null}
           </>
