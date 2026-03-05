@@ -586,26 +586,24 @@ const ensureRecipeHubHydrationPromise = () => {
   return recipeHubHydrationPromise;
 };
 
-const resolveWorkspaceCacheKeys = (workspaceId) => {
+const resolveWorkspaceCanonicalId = (workspaceId) => {
   const base = String(workspaceId || "").trim();
-  if (!base) return [];
-  const keys = new Set([base]);
+  if (!base) return "";
   const workspace = getWorkspace(base);
-  if (workspace) {
-    if (workspace.id) keys.add(String(workspace.id));
-    if (workspace.modelID) keys.add(String(workspace.modelID));
-  }
-  return Array.from(keys).filter(Boolean);
+  if (workspace?.id) return String(workspace.id);
+  return base;
+};
+
+const resolveWorkspaceCacheKeys = (workspaceId) => {
+  const canonical = resolveWorkspaceCanonicalId(workspaceId);
+  if (!canonical) return [];
+  return [canonical];
 };
 
 const resolveWorkspaceCacheWriteKeys = (workspaceId) => {
-  const base = String(workspaceId || "").trim();
-  if (!base) return [];
-  const workspace = getWorkspace(base);
-  if (workspace?.id) {
-    return [String(workspace.id)];
-  }
-  return [base];
+  const canonical = resolveWorkspaceCanonicalId(workspaceId);
+  if (!canonical) return [];
+  return [canonical];
 };
 
 const normalizeRecipeHubWorkspaces = (items = []) =>
@@ -866,20 +864,13 @@ export const deleteRecipeHubEntries = async (workspaceIds = []) => {
 
   targets.forEach((workspace) => {
     clearSpectrumRuntimeCache(workspace.id);
-    clearSpectrumRuntimeCache(workspace.modelID);
     clearPrecisionRuntimeCache(workspace.id);
-    clearPrecisionRuntimeCache(workspace.modelID);
   });
 
   saveState();
 
   await Promise.allSettled(
-    targets.flatMap((workspace) => [
-      clearWorkspaceCaseCache(workspace.id),
-      workspace.modelID && workspace.modelID !== workspace.id
-        ? clearWorkspaceCaseCache(workspace.modelID)
-        : Promise.resolve(true)
-    ])
+    targets.map((workspace) => clearWorkspaceCaseCache(workspace.id))
   );
 
   await syncRecipeHubToServer();

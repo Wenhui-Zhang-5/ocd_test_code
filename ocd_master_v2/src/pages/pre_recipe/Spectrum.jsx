@@ -192,6 +192,8 @@ export default function Spectrum({ workspaceId }) {
     waferOptions: []
   });
   const [themeTick, setThemeTick] = useState(0);
+  const [debugRestoreEnabled, setDebugRestoreEnabled] = useState(false);
+  const [debugRestoreSource, setDebugRestoreSource] = useState("");
   const persistIndexedRuntime = (runtimePayload) => {
     if (!workspaceId || !runtimePayload) return;
     void saveRuntimeToIndexedDb("spectrum", workspaceId, runtimePayload);
@@ -200,6 +202,18 @@ export default function Spectrum({ workspaceId }) {
   const plotlyRef = useRef(null);
   const restoringRef = useRef(false);
   const restoreHydrationRef = useRef(false);
+  const recordsReqSeqRef = useRef(0);
+  const toolOptionsReqSeqRef = useRef(0);
+  const recipeOptionsReqSeqRef = useRef(0);
+  const lotOptionsReqSeqRef = useRef(0);
+  const waferOptionsReqSeqRef = useRef(0);
+  const debugRestoreLog = (...args) => {
+    if (typeof window === "undefined") return;
+    const enabled = window.localStorage.getItem("ocd_restore_debug") === "1";
+    if (!enabled) return;
+    // eslint-disable-next-line no-console
+    console.info("[SpectrumRestore]", ...args);
+  };
   const isSelectionForWorkspace = (selection) => {
     if (!selection || typeof selection !== "object") return false;
     if (!workspaceId) return false;
@@ -217,6 +231,20 @@ export default function Spectrum({ workspaceId }) {
       observer.observe(body, { attributes: true, attributeFilter: ["data-theme"] });
     }
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const syncDebugFlag = () => {
+      setDebugRestoreEnabled(window.localStorage.getItem("ocd_restore_debug") === "1");
+    };
+    syncDebugFlag();
+    window.addEventListener("focus", syncDebugFlag);
+    window.addEventListener("storage", syncDebugFlag);
+    return () => {
+      window.removeEventListener("focus", syncDebugFlag);
+      window.removeEventListener("storage", syncDebugFlag);
+    };
   }, []);
 
   const pickSelectedData = ({ store, spectrumTable }, selectedTable = []) => {
@@ -273,6 +301,62 @@ export default function Spectrum({ workspaceId }) {
     if (!workspaceId) return;
     if (!shouldPersistWorkspaceCaseCache(workspaceId)) return;
     void saveWorkspaceCaseCacheSection(workspaceId, "spectrum", payload || {});
+  };
+
+  const resetImportViewByFilter = () => {
+    setShowTable(false);
+    setSelectedRows([]);
+    setShowPlot(false);
+  };
+
+  const handleTimeStartChange = (value) => {
+    setTimeStart(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setMachineId("");
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetImportViewByFilter();
+  };
+
+  const handleTimeEndChange = (value) => {
+    setTimeEnd(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setMachineId("");
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetImportViewByFilter();
+  };
+
+  const handleMachineChange = (value) => {
+    setMachineId(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetImportViewByFilter();
+  };
+
+  const handleRecipeChange = (value) => {
+    setRecipeName(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setLotId("");
+    setSelectedWafers([]);
+    resetImportViewByFilter();
+  };
+
+  const handleLotChange = (value) => {
+    setLotId(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setSelectedWafers([]);
+    resetImportViewByFilter();
+  };
+
+  const handleWaferChange = (values) => {
+    setSelectedWafers(values);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    resetImportViewByFilter();
   };
 
   const handleConfirm = () => {
@@ -463,6 +547,7 @@ export default function Spectrum({ workspaceId }) {
       };
       setSpectrumSelection(nextSelection);
       setShowPlot(true);
+      setDebugRestoreSource("api_import");
     } catch (error) {
       setImportError("Failed to load spectra. Please try again.");
     } finally {
@@ -471,7 +556,8 @@ export default function Spectrum({ workspaceId }) {
   };
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++recordsReqSeqRef.current;
+    const controller = new AbortController();
     const fetchRecords = async () => {
       setRecordsLoading(true);
       setRecordsError("");
@@ -479,35 +565,38 @@ export default function Spectrum({ workspaceId }) {
         const params = new URLSearchParams();
         if (timeStart) params.set("start", formatCompactDateParam(timeStart));
         if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
-        const response = await fetch(`${SPECTRUM_API_BASE}/records?${params.toString()}`);
+        const response = await fetch(`${SPECTRUM_API_BASE}/records?${params.toString()}`, {
+          signal: controller.signal
+        });
         if (!response.ok) {
           throw new Error("Records API failed");
         }
         const data = await response.json();
-        if (!cancelled) {
+        if (!controller.signal.aborted && requestSeq === recordsReqSeqRef.current) {
           setTimeFiltered(normalizeObjectRows(data.records || []));
         }
       } catch (error) {
-        if (!cancelled) {
+        if (controller.signal.aborted || requestSeq !== recordsReqSeqRef.current) return;
+        if (!controller.signal.aborted) {
           setTimeFiltered([]);
           setRecordsError("Failed to query object-storage records from API.");
         }
       } finally {
-        if (!cancelled) {
+        if (!controller.signal.aborted && requestSeq === recordsReqSeqRef.current) {
           setRecordsLoading(false);
         }
       }
     };
     fetchRecords();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd]);
 
   const withSelected = (options, selectedValues) =>
     Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
 
-  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
+  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [], signal }) => {
     const appendList = (params, key, values) => {
       (values || []).forEach((value) => {
         if (value !== undefined && value !== null && String(value).trim()) {
@@ -522,7 +611,9 @@ export default function Spectrum({ workspaceId }) {
     appendList(params, "tool", tools);
     appendList(params, "recipe", recipes);
     appendList(params, "lot", lots);
-    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
+    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`, {
+      signal
+    });
     if (!response.ok) {
       throw new Error(`Filter options API failed for field=${field}`);
     }
@@ -531,11 +622,12 @@ export default function Spectrum({ workspaceId }) {
   };
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++toolOptionsReqSeqRef.current;
+    const controller = new AbortController();
     const fetchToolOptions = async () => {
       try {
-        const toolOptions = await fetchFieldOptions({ field: "tool" });
-        if (cancelled) return;
+        const toolOptions = await fetchFieldOptions({ field: "tool", signal: controller.signal });
+        if (controller.signal.aborted || requestSeq !== toolOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           toolOptions: withSelected(toolOptions, [machineId]),
@@ -544,7 +636,7 @@ export default function Spectrum({ workspaceId }) {
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== toolOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           toolOptions: [],
@@ -556,12 +648,13 @@ export default function Spectrum({ workspaceId }) {
     };
     fetchToolOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++recipeOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId) {
       setFilterOptions((prev) => ({
         ...prev,
@@ -570,16 +663,17 @@ export default function Spectrum({ workspaceId }) {
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchRecipeOptions = async () => {
       try {
         const recipeOptions = await fetchFieldOptions({
           field: "recipe",
-          tools: [machineId]
+          tools: [machineId],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== recipeOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           recipeOptions: withSelected(recipeOptions, [recipeName]),
@@ -587,7 +681,7 @@ export default function Spectrum({ workspaceId }) {
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== recipeOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           recipeOptions: [],
@@ -598,12 +692,13 @@ export default function Spectrum({ workspaceId }) {
     };
     fetchRecipeOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++lotOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId || !recipeName) {
       setFilterOptions((prev) => ({
         ...prev,
@@ -611,7 +706,7 @@ export default function Spectrum({ workspaceId }) {
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchLotOptions = async () => {
@@ -619,16 +714,17 @@ export default function Spectrum({ workspaceId }) {
         const lotOptions = await fetchFieldOptions({
           field: "lot",
           tools: [machineId],
-          recipes: [recipeName]
+          recipes: [recipeName],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== lotOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           lotOptions: withSelected(lotOptions, [lotId]),
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== lotOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           lotOptions: [],
@@ -638,19 +734,20 @@ export default function Spectrum({ workspaceId }) {
     };
     fetchLotOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId, recipeName]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++waferOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId || !recipeName || !lotId) {
       setFilterOptions((prev) => ({
         ...prev,
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchWaferOptions = async () => {
@@ -659,9 +756,10 @@ export default function Spectrum({ workspaceId }) {
           field: "wafer",
           tools: [machineId],
           recipes: [recipeName],
-          lots: [lotId]
+          lots: [lotId],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== waferOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           waferOptions: withSelected(
@@ -670,7 +768,7 @@ export default function Spectrum({ workspaceId }) {
           )
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== waferOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           waferOptions: []
@@ -679,7 +777,7 @@ export default function Spectrum({ workspaceId }) {
     };
     fetchWaferOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId, recipeName, lotId, selectedWafers]);
 
@@ -699,10 +797,17 @@ export default function Spectrum({ workspaceId }) {
     if (!workspaceId) return;
     let cancelled = false;
     const finishRestore = () => {
-      setTimeout(() => {
+      const complete = () => {
         restoringRef.current = false;
         restoreHydrationRef.current = false;
-      }, 0);
+      };
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(complete);
+        });
+      } else {
+        setTimeout(complete, 50);
+      }
     };
 
     const restore = async () => {
@@ -724,56 +829,86 @@ export default function Spectrum({ workspaceId }) {
       const persistedRuntime = persistedCache?.spectrum?.runtime || null;
       const savedSelection = persistedSelection || savedSchemaSelection || savedGlobalSelection || null;
       const saved = persistedViewer || savedViewer || savedSelection;
-      if (!saved) {
+      const restoredMode = saved?.plotChannelMode || "SE";
+      const memoryRuntime = getSpectrumRuntimeCache(workspaceId);
+      const indexedRuntime =
+        memoryRuntime || persistedRuntime ? null : await loadRuntimeFromIndexedDb("spectrum", workspaceId);
+      if (cancelled) return;
+      const runtime = memoryRuntime || persistedRuntime || indexedRuntime || null;
+      const runtimeSource = memoryRuntime
+        ? "memory"
+        : persistedRuntime
+          ? "workspace_cache"
+          : indexedRuntime
+            ? "indexeddb"
+            : "none";
+
+      if (!saved && !runtime) {
+        setDebugRestoreSource("none");
+        debugRestoreLog("skip restore: no saved selection/viewer and no runtime cache");
         finishRestore();
         return;
       }
 
       setRestoreHint("");
-      if (saved.timeRange?.start) setTimeStart(saved.timeRange.start);
-      if (saved.timeRange?.end) setTimeEnd(saved.timeRange.end);
-      setMachineId(saved.machineId || savedSelection?.machineId || "");
-      setRecipeName(saved.recipeName || savedSelection?.recipeName || "");
-      setLotId(saved.lotId || savedSelection?.lotId || "");
-      setMeasurePosition(saved.measurePosition || savedSelection?.measurePosition || "T1");
-      setSelectedWafers(saved.waferIds || savedSelection?.waferIds || []);
-      if (Array.isArray(saved.selectedWafers)) setSelectedWafers(saved.selectedWafers);
-      if (saved.showTable !== undefined) setShowTable(Boolean(saved.showTable));
-      if (Array.isArray(saved.selectedRows)) setSelectedRows(saved.selectedRows);
-      if (saved.highlightSelections) setHighlightSelections(saved.highlightSelections);
-      if (Array.isArray(saved.highlightedSpectra)) setHighlightedSpectra(saved.highlightedSpectra);
-      if (saved.outlierThreshold !== undefined) setOutlierThreshold(saved.outlierThreshold);
-      if (saved.outlierMethod) setOutlierMethod(saved.outlierMethod);
-      if (Array.isArray(saved.outliers)) setOutliers(saved.outliers);
-      if (saved.showAdvancedTools !== undefined) setShowAdvancedTools(Boolean(saved.showAdvancedTools));
-      if (saved.showOutlierPanel !== undefined) setShowOutlierPanel(Boolean(saved.showOutlierPanel));
-      if (saved.showHighlightPanel !== undefined) setShowHighlightPanel(Boolean(saved.showHighlightPanel));
-      if (saved.plotChannelMode) setPlotChannelMode(saved.plotChannelMode);
+      if (saved?.timeRange?.start) setTimeStart(saved.timeRange.start);
+      if (saved?.timeRange?.end) setTimeEnd(saved.timeRange.end);
+      setMachineId(saved?.machineId || savedSelection?.machineId || "");
+      setRecipeName(saved?.recipeName || savedSelection?.recipeName || "");
+      setLotId(saved?.lotId || savedSelection?.lotId || "");
+      setMeasurePosition(
+        saved?.measurePosition || savedSelection?.measurePosition || runtime?.measurePosition || "T1"
+      );
+      setSelectedWafers(saved?.waferIds || savedSelection?.waferIds || []);
+      if (Array.isArray(saved?.selectedWafers)) setSelectedWafers(saved.selectedWafers);
+      if (saved?.showTable !== undefined) setShowTable(Boolean(saved.showTable));
+      if (Array.isArray(saved?.selectedRows)) setSelectedRows(saved.selectedRows);
+      if (saved?.highlightSelections) setHighlightSelections(saved.highlightSelections);
+      if (Array.isArray(saved?.highlightedSpectra)) setHighlightedSpectra(saved.highlightedSpectra);
+      if (saved?.outlierThreshold !== undefined) setOutlierThreshold(saved.outlierThreshold);
+      if (saved?.outlierMethod) setOutlierMethod(saved.outlierMethod);
+      if (Array.isArray(saved?.outliers)) setOutliers(saved.outliers);
+      if (saved?.showAdvancedTools !== undefined) setShowAdvancedTools(Boolean(saved.showAdvancedTools));
+      if (saved?.showOutlierPanel !== undefined) setShowOutlierPanel(Boolean(saved.showOutlierPanel));
+      if (saved?.showHighlightPanel !== undefined) setShowHighlightPanel(Boolean(saved.showHighlightPanel));
+      if (saved?.plotChannelMode) setPlotChannelMode(saved.plotChannelMode);
 
       const savedObjectRowsRaw = Array.isArray(savedSelection?.objectRows)
         ? savedSelection.objectRows
-        : Array.isArray(saved.objectRows)
+        : Array.isArray(saved?.objectRows)
           ? saved.objectRows
+          : Array.isArray(runtime?.objectRows)
+            ? runtime.objectRows
           : [];
       const savedObjectRows = normalizeObjectRows(savedObjectRowsRaw);
       const savedSelectedTable = Array.isArray(savedSelection?.selectedSpectra)
         ? savedSelection.selectedSpectra
-        : Array.isArray(saved.selectedSpectrumTable)
+        : Array.isArray(saved?.selectedSpectrumTable)
           ? saved.selectedSpectrumTable
+          : Array.isArray(runtime?.spectrumTable)
+            ? runtime.spectrumTable
           : [];
       setImportedObjectRows(savedObjectRows);
+      if (!saved) {
+        const runtimeWafers = Array.from(
+          new Set(savedObjectRows.map((row) => String(row?.waferId || "").trim()).filter(Boolean))
+        );
+        setSelectedWafers(runtimeWafers);
+      }
 
-      if (!saved.selectedRows?.length) {
+      if (!saved?.selectedRows?.length) {
         setSelectedRows(savedObjectRows.map((row) => row._rowKey));
       }
-      if (saved.showTable === undefined) {
-        setShowTable(Boolean(saved.selectedRows?.length || savedObjectRows.length));
+      if (saved?.showTable === undefined) {
+        setShowTable(Boolean(saved?.selectedRows?.length || savedObjectRows.length));
       }
 
       const allowAutoRestore =
-        (savedSelection?.restoreReady ?? saved.restoreReady) !== false && savedObjectRows.length > 0;
+        (savedSelection?.restoreReady ?? saved?.restoreReady ?? true) !== false &&
+        (savedObjectRows.length > 0 || Boolean(runtime));
 
       if (!allowAutoRestore) {
+        setDebugRestoreSource("blocked_restore_ready_false");
         clearSpectrumRuntimeCache(workspaceId);
         void clearRuntimeFromIndexedDb("spectrum", workspaceId);
         setShowPlot(false);
@@ -788,16 +923,14 @@ export default function Spectrum({ workspaceId }) {
         }
         setLoadingImport(false);
         setLoadingProgress(0);
+        debugRestoreLog("restore blocked by restoreReady=false", {
+          workspaceId,
+          savedObjectRows: savedObjectRows.length,
+          savedSelectedTable: savedSelectedTable.length
+        });
         finishRestore();
         return;
       }
-
-      const restoredMode = saved.plotChannelMode || "SE";
-      const memoryRuntime = getSpectrumRuntimeCache(workspaceId);
-      const indexedRuntime =
-        memoryRuntime || persistedRuntime ? null : await loadRuntimeFromIndexedDb("spectrum", workspaceId);
-      if (cancelled) return;
-      const runtime = memoryRuntime || persistedRuntime || indexedRuntime || null;
       if (runtime) {
         const selectedTable = savedSelectedTable.length
           ? savedSelectedTable
@@ -814,9 +947,17 @@ export default function Spectrum({ workspaceId }) {
         setPlotData(buildTracesFromStore(picked.store || {}, restoredMode));
         setSpectraStore(picked.store || {});
         setSelectedSpectrumTable(picked.spectrumTable || []);
-        setShowPlot(saved.showPlot === undefined ? true : Boolean(saved.showPlot));
+        setShowPlot(saved?.showPlot === undefined ? true : Boolean(saved.showPlot));
         setLoadingImport(false);
         setLoadingProgress(0);
+        setDebugRestoreSource(runtimeSource);
+        debugRestoreLog("restored from runtime cache", {
+          workspaceId,
+          source: runtimeSource,
+          objectRows: Array.isArray(savedObjectRows) ? savedObjectRows.length : 0,
+          selectedTable: Array.isArray(picked.spectrumTable) ? picked.spectrumTable.length : 0,
+          wafers: Object.keys(picked.store || {}).length
+        });
         finishRestore();
         return;
       }
@@ -847,6 +988,7 @@ export default function Spectrum({ workspaceId }) {
         setSpectrumRuntimeCache(workspaceId, runtimeSnapshot);
         persistIndexedRuntime(runtimeSnapshot);
         setShowPlot(true);
+        setDebugRestoreSource("api_reload");
       } catch (error) {
         if (!cancelled) {
           setImportError("Failed to restore spectra.");
@@ -855,6 +997,11 @@ export default function Spectrum({ workspaceId }) {
       } finally {
         if (!cancelled) {
           setLoadingImport(false);
+          debugRestoreLog("restored via API reload", {
+            workspaceId,
+            objectRows: Array.isArray(savedObjectRows) ? savedObjectRows.length : 0,
+            selectedTable: Array.isArray(savedSelectedTable) ? savedSelectedTable.length : 0
+          });
           finishRestore();
         }
       }
@@ -865,51 +1012,6 @@ export default function Spectrum({ workspaceId }) {
       cancelled = true;
     };
   }, [workspaceId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setMachineId("");
-    setRecipeName("");
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowPlot(false);
-  }, [timeStart, timeEnd]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setRecipeName("");
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowPlot(false);
-  }, [machineId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowPlot(false);
-  }, [recipeName]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowPlot(false);
-  }, [lotId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowPlot(false);
-  }, [selectedWafers]);
 
   const filteredObjects = useMemo(() => {
     return timeFiltered.filter((row) => {
@@ -1311,7 +1413,11 @@ export default function Spectrum({ workspaceId }) {
             Load DOE spectra by WaferID and compare curves with zoom and highlight.
           </p>
         </div>
-        <div />
+        <div className="inline-actions">
+          {debugRestoreEnabled ? (
+            <span className="chip">Restore: {debugRestoreSource || "n/a"}</span>
+          ) : null}
+        </div>
       </header>
 
       <section className="panel">
@@ -1325,13 +1431,13 @@ export default function Spectrum({ workspaceId }) {
               <input
                 type="datetime-local"
                 value={timeStart}
-                onChange={(event) => setTimeStart(event.target.value)}
+                onChange={(event) => handleTimeStartChange(event.target.value)}
               />
               <span>to</span>
               <input
                 type="datetime-local"
                 value={timeEnd}
-                onChange={(event) => setTimeEnd(event.target.value)}
+                onChange={(event) => handleTimeEndChange(event.target.value)}
               />
             </div>
           </div>
@@ -1339,7 +1445,7 @@ export default function Spectrum({ workspaceId }) {
             <label>Tool</label>
             <select
               value={machineId}
-              onChange={(event) => setMachineId(event.target.value)}
+              onChange={(event) => handleMachineChange(event.target.value)}
             >
               <option value="">Select tool</option>
               {displayToolOptions.map((id) => (
@@ -1351,7 +1457,7 @@ export default function Spectrum({ workspaceId }) {
             <label>Recipe Name</label>
             <select
               value={recipeName}
-              onChange={(event) => setRecipeName(event.target.value)}
+              onChange={(event) => handleRecipeChange(event.target.value)}
             >
               <option value="">Select recipe</option>
               {displayRecipeOptions.map((name) => (
@@ -1363,7 +1469,7 @@ export default function Spectrum({ workspaceId }) {
             <label>Lot ID</label>
             <select
               value={lotId}
-              onChange={(event) => setLotId(event.target.value)}
+              onChange={(event) => handleLotChange(event.target.value)}
             >
               <option value="">Select lot</option>
               {displayLotOptions.map((name) => (
@@ -1387,7 +1493,7 @@ export default function Spectrum({ workspaceId }) {
               label="WaferID"
               options={displayWaferOptions.map((id) => ({ value: id, label: id }))}
               value={selectedWafers}
-              onChange={setSelectedWafers}
+              onChange={handleWaferChange}
             />
           </div>
           <button className="primary-button" onClick={handleConfirm}>Confirm</button>

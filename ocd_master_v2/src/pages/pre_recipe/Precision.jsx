@@ -280,10 +280,24 @@ export default function Precision({ workspaceId }) {
   const [importedObjectRows, setImportedObjectRows] = useState([]);
   const [restoreHint, setRestoreHint] = useState("");
   const [themeTick, setThemeTick] = useState(0);
+  const [debugRestoreEnabled, setDebugRestoreEnabled] = useState(false);
+  const [debugRestoreSource, setDebugRestoreSource] = useState("");
   const restoringRef = useRef(false);
   const restoreHydrationRef = useRef(false);
   const pointPlotRef = useRef(null);
   const pointPlotlyRef = useRef(null);
+  const recordsReqSeqRef = useRef(0);
+  const toolOptionsReqSeqRef = useRef(0);
+  const recipeOptionsReqSeqRef = useRef(0);
+  const lotOptionsReqSeqRef = useRef(0);
+  const waferOptionsReqSeqRef = useRef(0);
+  const debugRestoreLog = (...args) => {
+    if (typeof window === "undefined") return;
+    const enabled = window.localStorage.getItem("ocd_restore_debug") === "1";
+    if (!enabled) return;
+    // eslint-disable-next-line no-console
+    console.info("[PrecisionRestore]", ...args);
+  };
   const persistIndexedRuntime = (runtimePayload) => {
     if (!workspaceId || !runtimePayload) return;
     void saveRuntimeToIndexedDb("precision", workspaceId, runtimePayload);
@@ -298,6 +312,80 @@ export default function Precision({ workspaceId }) {
     setShowTable(true);
   };
 
+  const resetPrecisionViewByFilter = () => {
+    setShowTable(false);
+    setSelectedRows([]);
+    setShowSummary(false);
+    setSummaryRows([]);
+    setCalcError("");
+    setPointPlotError("");
+    setPointPlotCurves([]);
+  };
+
+  const resetPrecisionLoadedSpectra = () => {
+    setSpectraStore({});
+    setSelectedSpectrumTable([]);
+  };
+
+  const handleTimeStartChange = (value) => {
+    setTimeStart(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setMachineId("");
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetPrecisionViewByFilter();
+    resetPrecisionLoadedSpectra();
+  };
+
+  const handleTimeEndChange = (value) => {
+    setTimeEnd(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setMachineId("");
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetPrecisionViewByFilter();
+    resetPrecisionLoadedSpectra();
+  };
+
+  const handleMachineChange = (value) => {
+    setMachineId(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setRecipeName("");
+    setLotId("");
+    setSelectedWafers([]);
+    resetPrecisionViewByFilter();
+  };
+
+  const handleRecipeChange = (value) => {
+    setRecipeName(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setLotId("");
+    setSelectedWafers([]);
+    resetPrecisionViewByFilter();
+  };
+
+  const handleLotChange = (value) => {
+    setLotId(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    setSelectedWafers([]);
+    resetPrecisionViewByFilter();
+  };
+
+  const handleMeasurePositionChange = (value) => {
+    setMeasurePosition(value);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    resetPrecisionViewByFilter();
+    resetPrecisionLoadedSpectra();
+  };
+
+  const handleWaferChange = (values) => {
+    setSelectedWafers(values);
+    if (restoringRef.current || restoreHydrationRef.current) return;
+    resetPrecisionViewByFilter();
+  };
+
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
     const html = document.documentElement;
@@ -309,6 +397,20 @@ export default function Precision({ workspaceId }) {
       observer.observe(body, { attributes: true, attributeFilter: ["data-theme"] });
     }
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const syncDebugFlag = () => {
+      setDebugRestoreEnabled(window.localStorage.getItem("ocd_restore_debug") === "1");
+    };
+    syncDebugFlag();
+    window.addEventListener("focus", syncDebugFlag);
+    window.addEventListener("storage", syncDebugFlag);
+    return () => {
+      window.removeEventListener("focus", syncDebugFlag);
+      window.removeEventListener("storage", syncDebugFlag);
+    };
   }, []);
 
   const normalizeLoadedSpectra = (payload) => {
@@ -510,6 +612,7 @@ export default function Precision({ workspaceId }) {
       setPrecisionRuntimeCache(workspaceId, runtimeSnapshot);
       persistIndexedRuntime(runtimeSnapshot);
       setShowSummary(true);
+      setDebugRestoreSource("api_import");
     } catch (error) {
       setRecordsError("Failed to load spectra from API.");
     } finally {
@@ -518,7 +621,8 @@ export default function Precision({ workspaceId }) {
   };
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++recordsReqSeqRef.current;
+    const controller = new AbortController();
     const fetchRecords = async () => {
       setRecordsLoading(true);
       setRecordsError("");
@@ -526,33 +630,36 @@ export default function Precision({ workspaceId }) {
         const params = new URLSearchParams();
         if (timeStart) params.set("start", formatCompactDateParam(timeStart));
         if (timeEnd) params.set("end", formatCompactDateParam(timeEnd));
-        const response = await fetch(`${SPECTRUM_API_BASE}/records?${params.toString()}`);
+        const response = await fetch(`${SPECTRUM_API_BASE}/records?${params.toString()}`, {
+          signal: controller.signal
+        });
         if (!response.ok) {
           throw new Error("Records API failed");
         }
         const data = await response.json();
-        if (!cancelled) {
+        if (!controller.signal.aborted && requestSeq === recordsReqSeqRef.current) {
           setTimeFiltered(normalizeObjectRows(data.records || []));
         }
       } catch (error) {
-        if (!cancelled) {
+        if (controller.signal.aborted || requestSeq !== recordsReqSeqRef.current) return;
+        if (!controller.signal.aborted) {
           setTimeFiltered([]);
           setRecordsError("Failed to query object-storage records from API.");
         }
       } finally {
-        if (!cancelled) setRecordsLoading(false);
+        if (!controller.signal.aborted && requestSeq === recordsReqSeqRef.current) setRecordsLoading(false);
       }
     };
     fetchRecords();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd]);
 
   const withSelected = (options, selectedValues) =>
     Array.from(new Set([...(options || []), ...(selectedValues || []).filter(Boolean)]));
 
-  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [] }) => {
+  const fetchFieldOptions = async ({ field, tools = [], recipes = [], lots = [], signal }) => {
     const appendList = (params, key, values) => {
       (values || []).forEach((value) => {
         if (value !== undefined && value !== null && String(value).trim()) {
@@ -567,7 +674,9 @@ export default function Precision({ workspaceId }) {
     appendList(params, "tool", tools);
     appendList(params, "recipe", recipes);
     appendList(params, "lot", lots);
-    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`);
+    const response = await fetch(`${SPECTRUM_API_BASE}/filter-options?${params.toString()}`, {
+      signal
+    });
     if (!response.ok) {
       throw new Error(`Filter options API failed for field=${field}`);
     }
@@ -576,11 +685,12 @@ export default function Precision({ workspaceId }) {
   };
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++toolOptionsReqSeqRef.current;
+    const controller = new AbortController();
     const fetchToolOptions = async () => {
       try {
-        const toolOptions = await fetchFieldOptions({ field: "tool" });
-        if (cancelled) return;
+        const toolOptions = await fetchFieldOptions({ field: "tool", signal: controller.signal });
+        if (controller.signal.aborted || requestSeq !== toolOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           toolOptions: withSelected(toolOptions, [machineId]),
@@ -589,7 +699,7 @@ export default function Precision({ workspaceId }) {
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== toolOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           toolOptions: [],
@@ -601,12 +711,13 @@ export default function Precision({ workspaceId }) {
     };
     fetchToolOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++recipeOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId) {
       setFilterOptions((prev) => ({
         ...prev,
@@ -615,16 +726,17 @@ export default function Precision({ workspaceId }) {
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchRecipeOptions = async () => {
       try {
         const recipeOptions = await fetchFieldOptions({
           field: "recipe",
-          tools: [machineId]
+          tools: [machineId],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== recipeOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           recipeOptions: withSelected(recipeOptions, [recipeName]),
@@ -632,7 +744,7 @@ export default function Precision({ workspaceId }) {
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== recipeOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           recipeOptions: [],
@@ -643,12 +755,13 @@ export default function Precision({ workspaceId }) {
     };
     fetchRecipeOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++lotOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId || !recipeName) {
       setFilterOptions((prev) => ({
         ...prev,
@@ -656,7 +769,7 @@ export default function Precision({ workspaceId }) {
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchLotOptions = async () => {
@@ -664,16 +777,17 @@ export default function Precision({ workspaceId }) {
         const lotOptions = await fetchFieldOptions({
           field: "lot",
           tools: [machineId],
-          recipes: [recipeName]
+          recipes: [recipeName],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== lotOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           lotOptions: withSelected(lotOptions, [lotId]),
           waferOptions: []
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== lotOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           lotOptions: [],
@@ -683,19 +797,20 @@ export default function Precision({ workspaceId }) {
     };
     fetchLotOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId, recipeName]);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestSeq = ++waferOptionsReqSeqRef.current;
+    const controller = new AbortController();
     if (!machineId || !recipeName || !lotId) {
       setFilterOptions((prev) => ({
         ...prev,
         waferOptions: []
       }));
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
     const fetchWaferOptions = async () => {
@@ -704,9 +819,10 @@ export default function Precision({ workspaceId }) {
           field: "wafer",
           tools: [machineId],
           recipes: [recipeName],
-          lots: [lotId]
+          lots: [lotId],
+          signal: controller.signal
         });
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== waferOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           waferOptions: withSelected(
@@ -715,7 +831,7 @@ export default function Precision({ workspaceId }) {
           )
         }));
       } catch (_error) {
-        if (cancelled) return;
+        if (controller.signal.aborted || requestSeq !== waferOptionsReqSeqRef.current) return;
         setFilterOptions((prev) => ({
           ...prev,
           waferOptions: []
@@ -724,7 +840,7 @@ export default function Precision({ workspaceId }) {
     };
     fetchWaferOptions();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeStart, timeEnd, machineId, recipeName, lotId, selectedWafers]);
 
@@ -949,10 +1065,17 @@ export default function Precision({ workspaceId }) {
     if (!workspaceId) return;
     let cancelled = false;
     const finishRestore = () => {
-      setTimeout(() => {
+      const complete = () => {
         restoringRef.current = false;
         restoreHydrationRef.current = false;
-      }, 0);
+      };
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(complete);
+        });
+      } else {
+        setTimeout(complete, 50);
+      }
     };
 
     const restore = async () => {
@@ -972,7 +1095,18 @@ export default function Precision({ workspaceId }) {
         cache || persistedRuntime ? null : await loadRuntimeFromIndexedDb("precision", workspaceId);
       if (cancelled) return;
       const runtime = cache || persistedRuntime || indexedRuntime || null;
-      if (!source && !runtime) return;
+      const runtimeSource = cache
+        ? "memory"
+        : persistedRuntime
+          ? "workspace_cache"
+          : indexedRuntime
+            ? "indexeddb"
+            : "none";
+      if (!source && !runtime) {
+        setDebugRestoreSource("none");
+        debugRestoreLog("skip restore: no selection and no runtime");
+        return;
+      }
 
       restoringRef.current = true;
       restoreHydrationRef.current = true;
@@ -1006,6 +1140,15 @@ export default function Precision({ workspaceId }) {
       }
 
       if (runtime) {
+        if (!source) {
+          const runtimeRows = normalizeObjectRows(Array.isArray(runtime.objectRows) ? runtime.objectRows : []);
+          const runtimeSelectedWafers = Array.from(
+            new Set(runtimeRows.map((row) => String(row?.waferId || "").trim()).filter(Boolean))
+          );
+          setSelectedWafers(runtimeSelectedWafers);
+          setSelectedRows(runtimeRows.map((row) => row._rowKey).filter(Boolean));
+          setShowTable(runtimeRows.length > 0);
+        }
         setMeasurePosition(runtime.measurePosition || source?.measurePosition || "T1");
         setImportedObjectRows(
           normalizeObjectRows(Array.isArray(runtime.objectRows) ? runtime.objectRows : source?.objectRows || [])
@@ -1032,6 +1175,16 @@ export default function Precision({ workspaceId }) {
         persistIndexedRuntime(runtime);
         setLoadingImport(false);
         setLoadingProgress(0);
+        setDebugRestoreSource(runtimeSource);
+        debugRestoreLog("restored from runtime cache", {
+          workspaceId,
+          source: runtimeSource,
+          objectRows: Array.isArray(runtime.objectRows) ? runtime.objectRows.length : 0,
+          selectedTable: Array.isArray(runtime.selectedSpectrumTable)
+            ? runtime.selectedSpectrumTable.length
+            : 0,
+          spectraStoreKeys: Object.keys(runtime.store || {}).length
+        });
         finishRestore();
         return;
       }
@@ -1050,6 +1203,12 @@ export default function Precision({ workspaceId }) {
       }
       setLoadingImport(false);
       setLoadingProgress(0);
+      setDebugRestoreSource("selection_only");
+      debugRestoreLog("restored from selection only (no runtime)", {
+        workspaceId,
+        objectRows: savedRows.length,
+        selectedTable: savedTable.length
+      });
       finishRestore();
     };
 
@@ -1058,86 +1217,6 @@ export default function Precision({ workspaceId }) {
       cancelled = true;
     };
   }, [workspaceId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setMachineId("");
-    setRecipeName("");
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSpectraStore({});
-    setSelectedSpectrumTable([]);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [timeStart, timeEnd]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setRecipeName("");
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [machineId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setLotId("");
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [recipeName]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setSelectedWafers([]);
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [lotId]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSpectraStore({});
-    setSelectedSpectrumTable([]);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [measurePosition]);
-
-  useEffect(() => {
-    if (restoringRef.current || restoreHydrationRef.current) return;
-    setShowTable(false);
-    setSelectedRows([]);
-    setShowSummary(false);
-    setSummaryRows([]);
-    setCalcError("");
-    setPointPlotError("");
-    setPointPlotCurves([]);
-  }, [selectedWafers]);
 
   const maxStdPoint = useMemo(() => {
     if (!summaryRows.length) return null;
@@ -1447,7 +1526,11 @@ export default function Precision({ workspaceId }) {
           <h2>Precision Evaluation</h2>
           <p className="subtle">Analyze repeatability and batch plot spectra by point.</p>
         </div>
-        <div />
+        <div className="inline-actions">
+          {debugRestoreEnabled ? (
+            <span className="chip">Restore: {debugRestoreSource || "n/a"}</span>
+          ) : null}
+        </div>
       </header>
 
       <section className="panel">
@@ -1461,13 +1544,13 @@ export default function Precision({ workspaceId }) {
               <input
                 type="datetime-local"
                 value={timeStart}
-                onChange={(event) => setTimeStart(event.target.value)}
+                onChange={(event) => handleTimeStartChange(event.target.value)}
               />
               <span>to</span>
               <input
                 type="datetime-local"
                 value={timeEnd}
-                onChange={(event) => setTimeEnd(event.target.value)}
+                onChange={(event) => handleTimeEndChange(event.target.value)}
               />
             </div>
           </div>
@@ -1475,7 +1558,7 @@ export default function Precision({ workspaceId }) {
             <label>Tool</label>
             <select
               value={machineId}
-              onChange={(event) => setMachineId(event.target.value)}
+              onChange={(event) => handleMachineChange(event.target.value)}
             >
               <option value="">Select tool</option>
               {toolOptions.map((id) => (
@@ -1487,7 +1570,7 @@ export default function Precision({ workspaceId }) {
             <label>Recipe Name</label>
             <select
               value={recipeName}
-              onChange={(event) => setRecipeName(event.target.value)}
+              onChange={(event) => handleRecipeChange(event.target.value)}
             >
               <option value="">Select recipe</option>
               {recipeOptions.map((name) => (
@@ -1499,7 +1582,7 @@ export default function Precision({ workspaceId }) {
             <label>Lot ID</label>
             <select
               value={lotId}
-              onChange={(event) => setLotId(event.target.value)}
+              onChange={(event) => handleLotChange(event.target.value)}
             >
               <option value="">Select lot</option>
               {lotOptions.map((name) => (
@@ -1511,7 +1594,7 @@ export default function Precision({ workspaceId }) {
             <label>Measure Position</label>
             <select
               value={measurePosition}
-              onChange={(event) => setMeasurePosition(event.target.value)}
+              onChange={(event) => handleMeasurePositionChange(event.target.value)}
             >
               <option value="T1">T1</option>
               <option value="T2">T2</option>
@@ -1523,7 +1606,7 @@ export default function Precision({ workspaceId }) {
               label="WaferID"
               options={waferOptions.map((id) => ({ value: id, label: id }))}
               value={selectedWafers}
-              onChange={setSelectedWafers}
+              onChange={handleWaferChange}
             />
           </div>
           <div className="form-row">
