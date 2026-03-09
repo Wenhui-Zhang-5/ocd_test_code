@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -252,6 +253,19 @@ def _score(gof: float, residual: float, correlation: float, lbh: float, mse: flo
     return float(gof * 10000.0 - residual * 100.0 + correlation * 100.0 - lbh * 10.0 - mse_penalty)
 
 
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def search_material_seeds(
     *,
     base_model_json: Dict[str, Any],
@@ -264,10 +278,23 @@ def search_material_seeds(
     top_k: int = 5,
     max_candidates: int = 24,
     num_of_node: Optional[List[int]] = None,
+    persist_dir: Optional[Path] = None,
+    persist_meta: Optional[Dict[str, Any]] = None,
 ) -> SeedSearchResult:
     baseline_path = str((baseline_spec_paths[0] if baseline_spec_paths else "") or "").strip()
     baseline_interp = _load_baseline_interpolated(base_model_json, baseline_path)
     hpc_spec_paths = [baseline_path] if baseline_path else []
+    persist_root = Path(persist_dir) if persist_dir is not None else None
+    if persist_root is not None:
+        meta_payload = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "model_id": model_id,
+            "baseline_path": baseline_path,
+            "top_k": int(top_k),
+            "max_candidates": int(max_candidates),
+            "meta": persist_meta or {},
+        }
+        _write_json(persist_root / "meta.json", meta_payload)
 
     material_combinations = _material_combinations(
         base_model_json=base_model_json,
@@ -355,9 +382,64 @@ def search_material_seeds(
         }
         if hpc_warning:
             debug_row["warning"] = hpc_warning
+
+        if persist_root is not None:
+            seed_payload = {
+                "seed_id": seed.seed_id,
+                "material_combo": labels,
+                "material_sources": sources,
+                "metrics": {
+                    "gof": seed.gof,
+                    "residual": seed.residual,
+                    "correlation": seed.correlation,
+                    "lbh": seed.lbh,
+                    "mse": seed.mse,
+                    "score": seed.score,
+                },
+                "model_json": selected_model,
+                "plot_data": plot_data,
+                "warning": hpc_warning,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            seed_file = persist_root / f"{seed.seed_id}.json"
+            _write_json(seed_file, seed_payload)
+            _append_jsonl(
+                persist_root / "candidates.jsonl",
+                {
+                    "seed_id": seed.seed_id,
+                    "file": str(seed_file),
+                    "gof": seed.gof,
+                    "residual": seed.residual,
+                    "correlation": seed.correlation,
+                    "lbh": seed.lbh,
+                    "mse": seed.mse,
+                    "score": seed.score,
+                },
+            )
+            debug_row["artifact_path"] = str(seed_file)
         debug_rows.append(debug_row)
 
     # Top-K selection rule: GOF only (descending).
     rows.sort(key=lambda s: -s.gof)
     top = rows[: max(1, top_k)]
+    if persist_root is not None:
+        _write_json(
+            persist_root / "top_seeds.json",
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "top_seeds": [
+                    {
+                        "seed_id": seed.seed_id,
+                        "gof": seed.gof,
+                        "residual": seed.residual,
+                        "correlation": seed.correlation,
+                        "lbh": seed.lbh,
+                        "mse": seed.mse,
+                        "score": seed.score,
+                        "file": str(persist_root / f"{seed.seed_id}.json"),
+                    }
+                    for seed in top
+                ],
+            },
+        )
     return SeedSearchResult(top_seeds=top, debug_rows=debug_rows)

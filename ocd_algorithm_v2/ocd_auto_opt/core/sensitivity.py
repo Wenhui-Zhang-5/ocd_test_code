@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -12,7 +15,6 @@ from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import apply_basis_offsets
 from ocd_algorithm_api.ocd_auto_opt.utils.spectrum_utils import (
     SensitivityInterval,
     aggregate_sensitivity,
-    mean_abs_channel_diff,
     normalize_spectrum_df,
 )
 
@@ -22,6 +24,75 @@ class SensitivityOutput:
     wavelengths: List[float]
     total_sensitivity: List[float]
     intervals: List[SensitivityInterval]
+    baseline_spectrum: Dict[str, Any] = field(default_factory=dict)
+    per_cd_curves: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _channels(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns if c != "wavelength"]
+
+
+def _curve_payload(df: pd.DataFrame) -> Dict[str, Any]:
+    if df is None or df.empty:
+        return {"wavelength": [], "channels": {}}
+    chs = _channels(df)
+    return {
+        "wavelength": [float(x) for x in df["wavelength"].tolist()],
+        "channels": {c: [float(v) for v in df[c].tolist()] for c in chs},
+    }
+
+
+def _align_three_spectra(base: pd.DataFrame, minus: pd.DataFrame, plus: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    b = normalize_spectrum_df(base)
+    m = normalize_spectrum_df(minus)
+    p = normalize_spectrum_df(plus)
+    if b.empty or m.empty or p.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    wb = b[["wavelength"]]
+    wm = m[["wavelength"]]
+    wp = p[["wavelength"]]
+    common_wl = wb.merge(wm, on="wavelength", how="inner").merge(wp, on="wavelength", how="inner")
+    if common_wl.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    ch_b = _channels(b)
+    ch_m = set(_channels(m))
+    ch_p = set(_channels(p))
+    common_ch = [c for c in ch_b if c in ch_m and c in ch_p]
+    if not common_ch:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    b_aligned = common_wl.merge(b[["wavelength", *common_ch]], on="wavelength", how="left")
+    m_aligned = common_wl.merge(m[["wavelength", *common_ch]], on="wavelength", how="left")
+    p_aligned = common_wl.merge(p[["wavelength", *common_ch]], on="wavelength", how="left")
+    return b_aligned.reset_index(drop=True), m_aligned.reset_index(drop=True), p_aligned.reset_index(drop=True)
+
+
+def _mean_abs_diff_curve(left: pd.DataFrame, right: pd.DataFrame) -> np.ndarray:
+    if left.empty or right.empty:
+        return np.asarray([], dtype=float)
+    chs = [c for c in _channels(left) if c in right.columns]
+    if not chs:
+        return np.asarray([], dtype=float)
+    diffs = []
+    for c in chs:
+        x = left[c].to_numpy(dtype=float)
+        y = right[c].to_numpy(dtype=float)
+        n = min(len(x), len(y))
+        if n <= 0:
+            continue
+        diffs.append(np.abs(x[:n] - y[:n]))
+    if not diffs:
+        return np.asarray([], dtype=float)
+    return np.mean(np.vstack(diffs), axis=0)
 
 
 def _synthetic_baseline_from_model(model_json: Dict[str, Any], spec_type: str) -> pd.DataFrame:
@@ -102,6 +173,8 @@ def sensitivity_analysis(
     interval_nm: float = 10.0,
     min_weight: float = 0.5,
     max_weight: float = 3.0,
+    persist_path: Optional[Path] = None,
+    persist_meta: Optional[Dict[str, Any]] = None,
 ) -> SensitivityOutput:
     # Keep parameter for interface compatibility; simulated spectrum no longer needs raw spec files.
     _ = reference_spec_path
@@ -120,9 +193,36 @@ def sensitivity_analysis(
     baseline_df = normalize_spectrum_df(baseline_df)
 
     if baseline_df.empty:
-        return SensitivityOutput(wavelengths=[], total_sensitivity=[], intervals=[])
+        out_empty = SensitivityOutput(
+            wavelengths=[],
+            total_sensitivity=[],
+            intervals=[],
+            baseline_spectrum={"wavelength": [], "channels": {}},
+            per_cd_curves={},
+        )
+        if persist_path is not None:
+            _write_json(
+                Path(persist_path),
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "model_id": model_id,
+                    "spec_type": spec_type,
+                    "target_cds": [str(cd).strip() for cd in target_cds if str(cd).strip()],
+                    "reference_spec_path": reference_spec_path,
+                    "meta": persist_meta or {},
+                    "wavelengths": [],
+                    "total_sensitivity": [],
+                    "intervals": [],
+                    "baseline_spectrum": out_empty.baseline_spectrum,
+                    "per_cd_curves": out_empty.per_cd_curves,
+                },
+            )
+        return out_empty
 
-    total = np.zeros(len(baseline_df), dtype=float)
+    baseline_payload = _curve_payload(baseline_df)
+    total = np.asarray([], dtype=float)
+    wavelength_ref = np.asarray([], dtype=float)
+    per_cd_curves: Dict[str, Dict[str, Any]] = {}
     cds = [str(cd).strip() for cd in target_cds if str(cd).strip()]
     if not cds:
         cds = ["CD_DEFAULT"]
@@ -146,26 +246,68 @@ def sensitivity_analysis(
             tag=f"{cd_name}:plus",
         )
 
-        minus_curve = mean_abs_channel_diff(baseline_df, minus_df)
-        plus_curve = mean_abs_channel_diff(baseline_df, plus_df)
+        base_aligned, minus_aligned, plus_aligned = _align_three_spectra(baseline_df, minus_df, plus_df)
+        if base_aligned.empty:
+            continue
+
+        minus_curve = _mean_abs_diff_curve(base_aligned, minus_aligned)
+        plus_curve = _mean_abs_diff_curve(base_aligned, plus_aligned)
         cd_sensitivity = 0.5 * (minus_curve + plus_curve)
+        per_cd_curves[cd_name] = {
+            "baseline": _curve_payload(base_aligned),
+            "minus": _curve_payload(minus_aligned),
+            "plus": _curve_payload(plus_aligned),
+            "diff_minus": [float(v) for v in minus_curve.tolist()],
+            "diff_plus": [float(v) for v in plus_curve.tolist()],
+            "cd_sensitivity": [float(v) for v in cd_sensitivity.tolist()],
+        }
 
         # Ensure same length by clipping to the shortest after alignment.
-        min_len = min(len(total), len(cd_sensitivity))
-        total = total[:min_len]
-        total += cd_sensitivity[:min_len]
-        baseline_df = baseline_df.iloc[:min_len].reset_index(drop=True)
+        if total.size == 0:
+            total = cd_sensitivity.copy()
+            wavelength_ref = base_aligned["wavelength"].to_numpy(dtype=float)
+        else:
+            min_len = min(len(total), len(cd_sensitivity), len(wavelength_ref))
+            total = total[:min_len]
+            total += cd_sensitivity[:min_len]
+            wavelength_ref = wavelength_ref[:min_len]
 
-    wavelength = baseline_df["wavelength"].to_numpy(dtype=float)
+    if total.size == 0:
+        total = np.zeros(len(baseline_df), dtype=float)
+        wavelength_ref = baseline_df["wavelength"].to_numpy(dtype=float)
+
     intervals = aggregate_sensitivity(
-        wavelength,
+        wavelength_ref,
         total,
         interval_nm=interval_nm,
         min_weight=min_weight,
         max_weight=max_weight,
     )
-    return SensitivityOutput(
-        wavelengths=[float(v) for v in wavelength.tolist()],
+    output = SensitivityOutput(
+        wavelengths=[float(v) for v in wavelength_ref.tolist()],
         total_sensitivity=[float(v) for v in total.tolist()],
         intervals=intervals,
+        baseline_spectrum=baseline_payload,
+        per_cd_curves=per_cd_curves,
     )
+    if persist_path is not None:
+        _write_json(
+            Path(persist_path),
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "model_id": model_id,
+                "spec_type": spec_type,
+                "target_cds": cds,
+                "reference_spec_path": reference_spec_path,
+                "meta": persist_meta or {},
+                "wavelengths": output.wavelengths,
+                "total_sensitivity": output.total_sensitivity,
+                "intervals": [
+                    {"start": x.start, "end": x.end, "step": x.step, "weight": x.weight}
+                    for x in output.intervals
+                ],
+                "baseline_spectrum": output.baseline_spectrum,
+                "per_cd_curves": output.per_cd_curves,
+            },
+        )
+    return output

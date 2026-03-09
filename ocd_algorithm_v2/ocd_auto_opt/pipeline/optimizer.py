@@ -6,24 +6,27 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ocd_algorithm_api.ocd_auto_opt.api.get_spectrum import SpectrumClient
-from ocd_algorithm_api.ocd_auto_opt.api.run_hpc import HPCClient
+from ocd_algorithm_api.ocd_auto_opt.api.run_hpc import HPCAPIError, HPCClient
 from ocd_algorithm_api.ocd_auto_opt.core.coupling import apply_coupling, coupling_candidates
+from ocd_algorithm_api.ocd_auto_opt.core.final_regression import run_final_regression_stage_for_grid
 from ocd_algorithm_api.ocd_auto_opt.core.fitting import FittingConfig, run_fitting
-from ocd_algorithm_api.ocd_auto_opt.core.precision_check import PrecisionCheckResult, PrecisionConfig, precision_check
+from ocd_algorithm_api.ocd_auto_opt.core.precision_check import PrecisionConfig, precision_check
 from ocd_algorithm_api.ocd_auto_opt.core.regression import (
     KPIThreshold,
-    baseline_gof_ok,
+    RegressionMetrics,
     compute_regression_metrics,
-    kpi_satisfied,
+    precision_three_sigma,
 )
 from ocd_algorithm_api.ocd_auto_opt.core.seed_search import SeedSearchConfig, search_material_seeds
 from ocd_algorithm_api.ocd_auto_opt.core.sensitivity import sensitivity_analysis
+from ocd_algorithm_api.ocd_auto_opt.utils.parse_hpc_result import parse_hpc_result
 from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import (
     apply_grid_fix_values,
     build_grid_specs,
     coupling_expressions,
     enumerate_grid_combinations,
     get_basis_rows,
+    sync_new_fields_from_nominal_value,
 )
 
 
@@ -76,8 +79,11 @@ class OCDOptimizer:
         return token or "unknown"
 
     def _resolve_case_data_root(self, schema: Dict[str, Any]) -> Path:
+        return self._resolve_case_root(schema) / "data"
+
+    def _resolve_case_root(self, schema: Dict[str, Any]) -> Path:
         if self.cfg.case_root is not None:
-            return Path(self.cfg.case_root) / "data"
+            return Path(self.cfg.case_root)
         try:
             from ocd_algorithm_api.config import OCD_CASE_ROOT
         except Exception:  # pragma: no cover
@@ -86,7 +92,7 @@ class OCDOptimizer:
         model_id = str(self.cfg.model_id or schema.get("modelID") or schema.get("modelId") or "").strip()
         version = str(schema.get("version") or "").strip()
         case_root = Path(OCD_CASE_ROOT) / f"model_{self._safe_token(model_id)}" / f"version_{self._safe_token(version)}"
-        return case_root / "data"
+        return case_root
 
     @staticmethod
     def _fitting_spec_type(schema: Dict[str, Any]) -> str:
@@ -283,9 +289,11 @@ class OCDOptimizer:
     def _build_precision_config(self, schema: Dict[str, Any], spec_paths: List[str], threshold: KPIThreshold) -> PrecisionConfig:
         must_float, must_fix, maybe = self._cd_groups(schema)
         target_cds = self._target_cds_from_kpi(schema)
+        target_thresholds = self._target_precision_thresholds_from_kpi(schema)
         return PrecisionConfig(
             precision_spec_paths=list(spec_paths),
             target_cds=target_cds,
+            target_precision_thresholds=target_thresholds,
             must_float_cds=must_float,
             must_fix_cds=must_fix,
             maybe_cds=maybe,
@@ -309,6 +317,24 @@ class OCDOptimizer:
                     continue
                 seen.add(token)
                 out.append(token)
+        return out
+
+    @staticmethod
+    def _target_precision_thresholds_from_kpi(schema: Dict[str, Any]) -> Dict[str, float]:
+        rows = schema.get("kpi") if isinstance(schema, dict) else []
+        out: Dict[str, float] = {}
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cd = str(row.get("cd") or "").strip()
+            if not cd:
+                continue
+            try:
+                out[cd] = float(row.get("precision"))
+            except (TypeError, ValueError):
+                continue
         return out
 
     @staticmethod
@@ -343,22 +369,261 @@ class OCDOptimizer:
         rows = [r for r in raw_rows if isinstance(r, dict)] if isinstance(raw_rows, list) else []
         return cd_columns, rows
 
+    @staticmethod
+    def _kpi_rows_by_cd(schema: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        rows = schema.get("kpi") if isinstance(schema, dict) else []
+        out: Dict[str, Dict[str, float]] = {}
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cd = str(row.get("cd") or "").strip()
+            if not cd:
+                continue
+
+            def _f(key: str) -> Optional[float]:
+                try:
+                    return float(row.get(key))
+                except (TypeError, ValueError):
+                    return None
+
+            out[cd] = {
+                "r2_min": _f("r2"),
+                "slope_min": _f("slope_low"),
+                "slope_max": _f("slope_high"),
+                "side_by_side_max": _f("sbs"),
+                "precision_max": _f("precision"),
+            }
+        return out
+
+    def _evaluate_tm_regression(
+        self,
+        *,
+        fitted_model: Dict[str, Any],
+        model_id: str,
+        regression_spec_paths: List[str],
+        tem_cd_columns: List[str],
+        tem_rows: List[Dict[str, Any]],
+        target_cds: List[str],
+        kpi_by_cd: Dict[str, Dict[str, float]],
+        threshold: KPIThreshold,
+    ) -> Tuple[RegressionMetrics, Dict[str, Dict[str, Any]], bool, str]:
+        parsed_records = []
+        warning = ""
+        if self.cfg.hpc_client is not None and regression_spec_paths:
+            try:
+                response = self.cfg.hpc_client.run_hpc(
+                    model_id=model_id,
+                    model_json=fitted_model,
+                    spec_paths=regression_spec_paths,
+                    num_of_node=self.cfg.num_of_node,
+                )
+                parsed_records = parse_hpc_result(response).records
+            except HPCAPIError as exc:
+                warning = str(exc)
+
+        basis_map = self._basis_value_map(fitted_model)
+        per_cd: Dict[str, Dict[str, Any]] = {}
+        merged_tm: List[float] = []
+        merged_ocd: List[float] = []
+
+        for cd in target_cds:
+            cd_idx = tem_cd_columns.index(cd) + 1 if cd in tem_cd_columns else None
+            tm_values: List[float] = []
+            ocd_values: List[float] = []
+
+            row_count = min(len(parsed_records), len(tem_rows)) if parsed_records else len(tem_rows)
+            for row_i in range(row_count):
+                row = tem_rows[row_i]
+                tm_raw = row.get(f"cd{cd_idx}") if cd_idx is not None else row.get(cd)
+                try:
+                    tm_val = float(tm_raw)
+                except (TypeError, ValueError):
+                    continue
+
+                if parsed_records:
+                    raw_ocd = parsed_records[row_i].basis_values.get(cd)
+                    try:
+                        ocd_val = float(raw_ocd)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    if cd not in basis_map:
+                        continue
+                    ocd_val = float(basis_map[cd])
+
+                tm_values.append(tm_val)
+                ocd_values.append(ocd_val)
+
+            if not tm_values and cd in basis_map:
+                x = float(basis_map[cd])
+                tm_values = [x]
+                ocd_values = [x]
+
+            metrics = compute_regression_metrics(tm_values, ocd_values)
+            cd_thresholds = kpi_by_cd.get(cd, {})
+            r2_min = float(cd_thresholds.get("r2_min") or threshold.r2_min)
+            slope_min = float(cd_thresholds.get("slope_min") or threshold.slope_min)
+            slope_max = float(cd_thresholds.get("slope_max") or threshold.slope_max)
+            sbs_max = float(cd_thresholds.get("side_by_side_max") or threshold.side_by_side_max)
+            cd_passed = (
+                metrics.r2 >= r2_min
+                and metrics.slope >= slope_min
+                and metrics.slope <= slope_max
+                and metrics.side_by_side <= sbs_max
+            )
+
+            per_cd[cd] = {
+                "r2": metrics.r2,
+                "slope": metrics.slope,
+                "side_by_side": metrics.side_by_side,
+                "count": len(tm_values),
+                "tm_values": tm_values,
+                "ocd_values": ocd_values,
+                "thresholds": {
+                    "r2_min": r2_min,
+                    "slope_min": slope_min,
+                    "slope_max": slope_max,
+                    "side_by_side_max": sbs_max,
+                },
+                "passed": cd_passed,
+            }
+
+            merged_tm.extend(tm_values)
+            merged_ocd.extend(ocd_values)
+
+        aggregate = compute_regression_metrics(merged_tm, merged_ocd)
+        passed = bool(per_cd) and all(bool(v.get("passed")) for v in per_cd.values())
+        return aggregate, per_cd, passed, warning
+
+    def _evaluate_precision_targets(
+        self,
+        *,
+        fitted_model: Dict[str, Any],
+        model_id: str,
+        precision_spec_paths: List[str],
+        target_cds: List[str],
+        target_precision_thresholds: Dict[str, float],
+        default_precision_threshold: float,
+    ) -> Dict[str, Any]:
+        per_cd_precision: Dict[str, float] = {}
+        warning = ""
+
+        if self.cfg.hpc_client is None or not precision_spec_paths:
+            for cd in target_cds:
+                per_cd_precision[cd] = 0.2
+            per_cd_passed = {
+                cd: per_cd_precision.get(cd, float("inf")) <= float(target_precision_thresholds.get(cd, default_precision_threshold))
+                for cd in target_cds
+            }
+            return {
+                "target_precision_3sigma": per_cd_precision,
+                "target_passed": per_cd_passed,
+                "lbh": 0.0,
+                "passed": bool(target_cds) and all(per_cd_passed.values()),
+                "warning": warning,
+            }
+
+        try:
+            response = self.cfg.hpc_client.run_hpc(
+                model_id=model_id,
+                model_json=fitted_model,
+                spec_paths=precision_spec_paths,
+                num_of_node=self.cfg.num_of_node,
+            )
+            records = parse_hpc_result(response).records
+        except HPCAPIError as exc:
+            warning = str(exc)
+            records = []
+
+        lbh = 1e9
+        if records:
+            lbh = float(max(abs(float(rec.lbh)) for rec in records))
+
+        for cd in target_cds:
+            values: List[float] = []
+            for rec in records:
+                raw = rec.basis_values.get(cd)
+                try:
+                    values.append(float(raw))
+                except (TypeError, ValueError):
+                    continue
+            if len(values) <= 1:
+                per_cd_precision[cd] = float("inf")
+            else:
+                per_cd_precision[cd] = float(precision_three_sigma(values))
+
+        per_cd_passed = {}
+        for cd in target_cds:
+            limit = float(target_precision_thresholds.get(cd, default_precision_threshold))
+            per_cd_passed[cd] = float(per_cd_precision.get(cd, float("inf"))) <= limit
+
+        passed = bool(target_cds) and abs(lbh) <= 1e-12 and all(per_cd_passed.values())
+        return {
+            "target_precision_3sigma": per_cd_precision,
+            "target_passed": per_cd_passed,
+            "lbh": lbh,
+            "passed": passed,
+            "warning": warning,
+        }
+
+    def _baseline_fit_once(
+        self,
+        *,
+        model_json: Dict[str, Any],
+        model_id: str,
+        baseline_fit_paths: List[str],
+    ) -> Tuple[Dict[str, Any], float, float, float, str]:
+        if self.cfg.hpc_client is None or not baseline_fit_paths:
+            return sync_new_fields_from_nominal_value(model_json), 0.98, 0.01, 0.0, "offline baseline"
+
+        try:
+            response = self.cfg.hpc_client.run_hpc(
+                model_id=model_id,
+                model_json=model_json,
+                spec_paths=baseline_fit_paths,
+                num_of_node=self.cfg.num_of_node,
+            )
+        except HPCAPIError as exc:
+            return sync_new_fields_from_nominal_value(model_json), 0.0, 1e9, 1e9, str(exc)
+
+        parsed = parse_hpc_result(response)
+        if not parsed.records:
+            return sync_new_fields_from_nominal_value(model_json), 0.0, 1e9, 1e9, "empty hpc result"
+
+        best = max(parsed.records, key=lambda r: r.gof)
+        selected_model = model_json
+        if parsed.mats and 0 <= best.index < len(parsed.mats) and isinstance(parsed.mats[best.index], dict):
+            selected_model = parsed.mats[best.index]
+        selected_model = sync_new_fields_from_nominal_value(selected_model)
+        return selected_model, float(best.gof), float(best.residual), float(best.lbh), "ok"
+
     def run(self) -> OptimizerResult:
         schema = self.cfg.recipe_schema
         base_model = self.cfg.base_model_json
+        case_root = self._resolve_case_root(schema)
+        results_root = case_root / "Results"
+        seed_search_root = results_root / "seed_search"
+        sensitivity_root = results_root / "sensitivity"
         fitting_spec_type = self._fitting_spec_type(schema)
         precision_spec_type = self._precision_spec_type(schema, fitting_spec_type)
-        data_root = self._resolve_case_data_root(schema)
+        data_root = case_root / "data"
 
         regression_spec_paths = self._parse_regression_spec_paths(schema, data_root, fitting_spec_type)
         baseline_spec_paths = self._parse_baseline_spec_paths(schema, data_root, fitting_spec_type)
         precision_spec_paths = self._parse_precision_spec_paths(schema, data_root, precision_spec_type)
+        if not baseline_spec_paths:
+            raise ValueError("baseline spectrum path is required but unresolved from baselineWafer/baselineSpectrum")
+        if not precision_spec_paths:
+            raise ValueError("precision spectrum paths are required but unresolved from precision.selectedSpectra")
         seed_search_config = self._build_seed_search_config(schema)
         kpi_threshold = self._kpi_threshold(schema)
         fitting_config = self._build_fitting_config(schema)
-        baseline_fit_paths = baseline_spec_paths or regression_spec_paths
-        precision_eval_paths = precision_spec_paths or baseline_fit_paths
+        baseline_fit_paths = list(baseline_spec_paths)
+        precision_eval_paths = list(precision_spec_paths)
         precision_config = self._build_precision_config(schema, precision_eval_paths, kpi_threshold)
+        kpi_by_cd = self._kpi_rows_by_cd(schema)
         tem_cd_columns, tem_rows = self._extract_tem_inputs(schema)
         must_float, must_fix, maybe = self._cd_groups(schema)
 
@@ -366,6 +631,9 @@ class OCDOptimizer:
         solutions: List[OptimizationSolution] = []
         debug: Dict[str, Any] = {
             "data_root": str(data_root),
+            "results_root": str(results_root),
+            "seed_search_root": str(seed_search_root),
+            "sensitivity_root": str(sensitivity_root),
             "fitting_spec_type": fitting_spec_type,
             "precision_spec_type": precision_spec_type,
             "baseline_spec_paths": baseline_spec_paths,
@@ -386,6 +654,7 @@ class OCDOptimizer:
             "precision_config": {
                 "path_count": len(precision_config.precision_spec_paths),
                 "target_cds": precision_config.target_cds,
+                "target_precision_thresholds": precision_config.target_precision_thresholds,
                 "must_float_cds": precision_config.must_float_cds,
                 "must_fix_cds": precision_config.must_fix_cds,
                 "maybe_cds": precision_config.maybe_cds,
@@ -406,6 +675,7 @@ class OCDOptimizer:
                 "side_by_side_max": kpi_threshold.side_by_side_max,
                 "precision_max": kpi_threshold.precision_max,
             },
+            "kpi_by_cd": kpi_by_cd,
             "tem_input": {
                 "cd_column_count": len(tem_cd_columns),
                 "row_count": len(tem_rows),
@@ -421,8 +691,6 @@ class OCDOptimizer:
             "regression": [],
         }
 
-        baseline_solution_gof = None
-
         for coupling_idx, expression in enumerate(expressions, start=1):
             coupled_model = apply_coupling(base_model, expression)
             self._emit("coupling", {"index": coupling_idx, "total": len(expressions), "expression": expression})
@@ -437,6 +705,11 @@ class OCDOptimizer:
                 must_float_cds=must_float,
                 top_k=self.cfg.seed_top_k,
                 num_of_node=self.cfg.num_of_node,
+                persist_dir=seed_search_root / f"coupling_{coupling_idx:02d}",
+                persist_meta={
+                    "coupling_index": coupling_idx,
+                    "coupling_expression": expression,
+                },
             )
             debug["seed_search"].append(
                 {
@@ -473,9 +746,7 @@ class OCDOptimizer:
                         "step_count": len(fit_result.steps),
                     }
                 )
-
-                if baseline_solution_gof is None:
-                    baseline_solution_gof = fit_result.best_gof
+                seed_baseline_gof = fit_result.best_gof
 
                 precision_result = precision_check(
                     fitted_model_json=fit_result.model_json,
@@ -499,13 +770,12 @@ class OCDOptimizer:
                         "baseline_precision_3sigma": precision_result.baseline_precision_3sigma,
                         "selected_precision_3sigma": precision_result.selected_precision_3sigma,
                         "selected_lbh": precision_result.selected_lbh,
+                        "selected_case_passed": precision_result.selected_case_passed,
+                        "summary": precision_result.summary,
                     }
                 )
 
-                reference_spec_path = (
-                    (baseline_spec_paths[0] if baseline_spec_paths else "")
-                    or (regression_spec_paths[0] if regression_spec_paths else "")
-                )
+                reference_spec_path = baseline_spec_paths[0]
                 sensitivity_result = sensitivity_analysis(
                     fitted_model_json=fit_result.model_json,
                     model_id=self.cfg.model_id,
@@ -513,12 +783,20 @@ class OCDOptimizer:
                     target_cds=precision_result.baseline_case.target_cds,
                     spectrum_client=self.cfg.spectrum_client,
                     reference_spec_path=reference_spec_path,
+                    persist_path=sensitivity_root / f"coupling_{coupling_idx:02d}" / f"{seed.seed_id}.json",
+                    persist_meta={
+                        "coupling_index": coupling_idx,
+                        "coupling_expression": expression,
+                        "seed_id": seed.seed_id,
+                    },
                 )
                 debug["sensitivity"].append(
                     {
                         "coupling": expression,
                         "seed_id": seed.seed_id,
                         "interval_count": len(sensitivity_result.intervals),
+                        "per_cd_count": len(sensitivity_result.per_cd_curves),
+                        "artifact_path": str(sensitivity_root / f"coupling_{coupling_idx:02d}" / f"{seed.seed_id}.json"),
                     }
                 )
 
@@ -537,58 +815,130 @@ class OCDOptimizer:
                     )
 
                     grid_model = apply_grid_fix_values(fit_result.model_json, grid_combo)
-                    final_fit = run_fitting(
-                        seed_model_json=grid_model,
+                    target_cds = list(precision_result.baseline_case.target_cds or precision_config.target_cds)
+
+                    def _kpi_evaluator(
+                        model_for_kpi: Dict[str, Any],
+                        iter_idx: int,
+                        material_name: str,
+                        step_name: str,
+                        baseline_gof: float,
+                    ) -> Dict[str, Any]:
+                        reg, reg_per_cd, reg_passed, reg_warning = self._evaluate_tm_regression(
+                            fitted_model=model_for_kpi,
+                            model_id=self.cfg.model_id,
+                            regression_spec_paths=regression_spec_paths,
+                            tem_cd_columns=tem_cd_columns,
+                            tem_rows=tem_rows,
+                            target_cds=target_cds,
+                            kpi_by_cd=kpi_by_cd,
+                            threshold=kpi_threshold,
+                        )
+                        precision_eval = self._evaluate_precision_targets(
+                            fitted_model=model_for_kpi,
+                            model_id=self.cfg.model_id,
+                            precision_spec_paths=precision_eval_paths,
+                            target_cds=target_cds,
+                            target_precision_thresholds=precision_config.target_precision_thresholds,
+                            default_precision_threshold=precision_config.precision_threshold,
+                        )
+                        precision_metric = (
+                            float(max(precision_eval["target_precision_3sigma"].values()))
+                            if precision_eval["target_precision_3sigma"]
+                            else float("inf")
+                        )
+                        passed = bool(reg_passed and precision_eval["passed"])
+                        return {
+                            "passed": passed,
+                            "iteration": iter_idx,
+                            "material": material_name,
+                            "step": step_name,
+                            "baseline_gof": baseline_gof,
+                            "regression_metrics": {
+                                "r2": reg.r2,
+                                "slope": reg.slope,
+                                "side_by_side": reg.side_by_side,
+                            },
+                            "regression_per_cd": reg_per_cd,
+                            "regression_passed": reg_passed,
+                            "regression_warning": reg_warning,
+                            "precision_eval": precision_eval,
+                            "precision_metric": precision_metric,
+                        }
+
+                    final_stage = run_final_regression_stage_for_grid(
+                        start_model_json=grid_model,
                         fitting_config=fitting_config,
-                        model_id=self.cfg.model_id,
-                        spec_paths=baseline_fit_paths,
-                        hpc_client=self.cfg.hpc_client,
+                        baseline_fit_once=lambda candidate: self._baseline_fit_once(
+                            model_json=candidate,
+                            model_id=self.cfg.model_id,
+                            baseline_fit_paths=baseline_fit_paths,
+                        ),
+                        kpi_evaluator=_kpi_evaluator,
+                        baseline_drop_limit_ratio=0.9,
                     )
 
-                    if baseline_solution_gof is not None and not baseline_gof_ok(
-                        baseline_solution_gof,
-                        final_fit.best_gof,
-                        drop_limit_ratio=0.9,
-                    ):
+                    debug_row: Dict[str, Any] = {
+                        "coupling": expression,
+                        "seed_id": seed.seed_id,
+                        "grid": grid_combo,
+                        "grid_index": grid_idx,
+                        "baseline_gof_seed": seed_baseline_gof,
+                        "final_baseline_gof": final_stage.get("final_baseline_gof"),
+                        "final_baseline_residual": final_stage.get("final_baseline_residual"),
+                        "final_baseline_lbh": final_stage.get("final_baseline_lbh"),
+                        "history": final_stage.get("history", []),
+                    }
+                    if not final_stage.get("accepted"):
+                        debug_row["accepted"] = False
+                        debug_row["reject_reason"] = final_stage.get("reject_reason", "final_stage_rejected")
+                        debug["regression"].append(debug_row)
                         continue
 
-                    regression_metrics, precision_metric, threshold = self._evaluate_kpi_inputs(
-                        fitted_model=final_fit.model_json,
-                        precision_result=precision_result,
-                        tem_cd_columns=tem_cd_columns,
-                        tem_rows=tem_rows,
-                        threshold=kpi_threshold,
-                    )
-                    ok = kpi_satisfied(regression_metrics, precision_metric, threshold)
+                    result_payload = final_stage.get("result", {})
+                    regression_metrics = result_payload.get("regression_metrics", {})
+                    regression_per_cd = result_payload.get("regression_per_cd", {})
+                    precision_eval = result_payload.get("precision_eval", {})
+                    precision_metric = float(result_payload.get("precision_metric", float("inf")))
+                    final_model_json = result_payload.get("model_json", grid_model)
 
-                    debug["regression"].append(
+                    debug_row.update(
                         {
-                            "coupling": expression,
-                            "seed_id": seed.seed_id,
-                            "grid": grid_combo,
-                            "r2": regression_metrics.r2,
-                            "slope": regression_metrics.slope,
-                            "sbs": regression_metrics.side_by_side,
+                            "r2": float(regression_metrics.get("r2", 0.0)),
+                            "slope": float(regression_metrics.get("slope", 0.0)),
+                            "sbs": float(regression_metrics.get("side_by_side", 1e9)),
                             "precision": precision_metric,
-                            "accepted": ok,
+                            "precision_lbh": float(precision_eval.get("lbh", 1e9)),
+                            "precision_target_3sigma": dict(precision_eval.get("target_precision_3sigma", {})),
+                            "precision_target_passed": dict(precision_eval.get("target_passed", {})),
+                            "regression_per_cd": regression_per_cd,
+                            "regression_passed": True,
+                            "precision_passed": True,
+                            "accepted": True,
                         }
                     )
-                    if not ok:
-                        continue
+                    if result_payload.get("regression_warning"):
+                        debug_row["regression_warning"] = result_payload.get("regression_warning")
+                    if isinstance(precision_eval, dict) and precision_eval.get("warning"):
+                        debug_row["precision_warning"] = precision_eval.get("warning")
+                    debug["regression"].append(debug_row)
 
                     solution = OptimizationSolution(
                         solution_id=f"sol_{len(solutions) + 1:03d}",
-                        model_json=final_fit.model_json,
+                        model_json=final_model_json,
                         grid_fix_values=grid_combo,
                         regression_metrics={
-                            "r2": regression_metrics.r2,
-                            "slope": regression_metrics.slope,
-                            "side_by_side": regression_metrics.side_by_side,
+                            "r2": float(regression_metrics.get("r2", 0.0)),
+                            "slope": float(regression_metrics.get("slope", 0.0)),
+                            "side_by_side": float(regression_metrics.get("side_by_side", 1e9)),
                         },
                         precision_metrics={
                             "precision_3sigma": precision_metric,
                             "baseline_precision_3sigma": precision_result.baseline_precision_3sigma,
-                            "selected_lbh": precision_result.selected_lbh,
+                            "selected_lbh": float(precision_eval.get("lbh", 1e9)),
+                            "selected_case_passed": bool(precision_eval.get("passed", False)),
+                            "target_precision_3sigma": dict(precision_eval.get("target_precision_3sigma", {})),
+                            "target_precision_passed": dict(precision_eval.get("target_passed", {})),
                         },
                         spectrum_data={
                             "spec_type": fitting_spec_type,
@@ -597,11 +947,14 @@ class OCDOptimizer:
                             "sensitivity_intervals": [
                                 [x.start, x.end, x.step, x.weight] for x in sensitivity_result.intervals
                             ],
+                            "baseline_spectrum": sensitivity_result.baseline_spectrum,
+                            "per_cd_curves": sensitivity_result.per_cd_curves,
+                            "regression_per_cd": regression_per_cd,
                         },
                         meta={
                             "coupling_expression": expression,
                             "seed_id": seed.seed_id,
-                            "fit_gof": final_fit.best_gof,
+                            "fit_gof": float(final_stage.get("final_baseline_gof", 0.0)),
                         },
                     )
                     solutions.append(solution)
@@ -619,41 +972,6 @@ class OCDOptimizer:
                 continue
             out[alias] = float(row.get("nominalNew", row.get("nominal", 0.0)) or 0.0)
         return out
-
-    def _evaluate_kpi_inputs(
-        self,
-        *,
-        fitted_model: Dict[str, Any],
-        precision_result: PrecisionCheckResult,
-        tem_cd_columns: List[str],
-        tem_rows: List[Dict[str, Any]],
-        threshold: KPIThreshold,
-    ):
-        tm_values: List[float] = []
-        ocd_values: List[float] = []
-
-        basis_map = self._basis_value_map(fitted_model)
-
-        for row in tem_rows:
-            for idx, cd_alias in enumerate(tem_cd_columns, start=1):
-                tm_key = f"cd{idx}"
-                try:
-                    tm_val = float(row.get(tm_key))
-                except (TypeError, ValueError):
-                    continue
-                ocd_val = float(basis_map.get(cd_alias, tm_val))
-                tm_values.append(tm_val)
-                ocd_values.append(ocd_val)
-
-        if not tm_values:
-            # fallback: identity mapping using basis values
-            for alias, value in basis_map.items():
-                tm_values.append(float(value))
-                ocd_values.append(float(value))
-
-        reg = compute_regression_metrics(tm_values, ocd_values)
-        precision_metric = float(precision_result.selected_precision_3sigma)
-        return reg, precision_metric, threshold
 
     @staticmethod
     def _kpi_threshold(schema: Dict[str, Any]) -> KPIThreshold:
