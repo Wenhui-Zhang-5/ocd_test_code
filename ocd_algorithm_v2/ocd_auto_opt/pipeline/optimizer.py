@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import pandas as pd
 
 from ocd_algorithm_api.ocd_auto_opt.api.get_spectrum import SpectrumClient
 from ocd_algorithm_api.ocd_auto_opt.api.run_hpc import HPCAPIError, HPCClient
@@ -26,8 +30,10 @@ from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import (
     coupling_expressions,
     enumerate_grid_combinations,
     get_basis_rows,
+    get_material_rows,
     sync_new_fields_from_nominal_value,
 )
+from ocd_algorithm_api.ocd_auto_opt.utils.spectrum_utils import align_spectra, normalize_spectrum_df, plain_mse
 
 
 ProgressCallback = Callable[[str, Dict[str, Any]], None]
@@ -77,6 +83,123 @@ class OCDOptimizer:
     def _safe_token(value: str) -> str:
         token = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in (value or "").strip())
         return token or "unknown"
+
+    @staticmethod
+    def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    @staticmethod
+    def _append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _finite_or_none(value: Any) -> Optional[float]:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+
+    @staticmethod
+    def _nk_snapshot(model_json: Dict[str, Any]) -> Dict[str, Any]:
+        materials: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for row in get_material_rows(model_json):
+            material = str(row.get("material") or "").strip() or "unknown_material"
+            model = str(row.get("model") or "").strip() or "unknown_model"
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            value = row.get("valueNew", row.get("value"))
+            try:
+                val = float(value)
+            except (TypeError, ValueError):
+                continue
+            materials.setdefault(material, {}).setdefault(model, {})[name] = val
+        return {"materials": materials}
+
+    @staticmethod
+    def _curve_payload(df: pd.DataFrame) -> Dict[str, Any]:
+        if df is None or df.empty:
+            return {"wavelength": [], "channels": {}}
+        channels = [c for c in df.columns if c != "wavelength"]
+        return {
+            "wavelength": [float(x) for x in df["wavelength"].tolist()],
+            "channels": {c: [float(v) for v in df[c].tolist()] for c in channels},
+        }
+
+    def _spectrum_fit_payload(
+        self,
+        *,
+        model_json: Dict[str, Any],
+        model_id: str,
+        measured_path: str,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "measured_path": measured_path,
+            "mse": None,
+            "measured": {"wavelength": [], "channels": {}},
+            "simulated": {"wavelength": [], "channels": {}},
+            "aligned_measured": {"wavelength": [], "channels": {}},
+            "aligned_simulated": {"wavelength": [], "channels": {}},
+            "warning": "",
+        }
+        if not measured_path:
+            payload["warning"] = "measured_path_empty"
+            return payload
+
+        try:
+            measured_df = pd.read_csv(Path(measured_path))
+        except Exception as exc:  # noqa: BLE001
+            payload["warning"] = f"failed_to_read_measured:{exc}"
+            return payload
+
+        measured_df = normalize_spectrum_df(measured_df)
+        payload["measured"] = self._curve_payload(measured_df)
+        if measured_df.empty:
+            payload["warning"] = "measured_empty_after_normalization"
+            return payload
+
+        simulated_df = pd.DataFrame()
+        if self.cfg.spectrum_client is not None:
+            try:
+                simulated_df = self.cfg.spectrum_client.get_spectrum(
+                    model_id=model_id,
+                    model_json=model_json,
+                )
+            except Exception as exc:  # noqa: BLE001
+                payload["warning"] = f"get_spectrum_failed:{exc}"
+                simulated_df = pd.DataFrame()
+        simulated_df = normalize_spectrum_df(simulated_df)
+        payload["simulated"] = self._curve_payload(simulated_df)
+        if simulated_df.empty:
+            if not payload["warning"]:
+                payload["warning"] = "simulated_empty"
+            return payload
+
+        aligned_measured, aligned_simulated = align_spectra(measured_df, simulated_df)
+        payload["aligned_measured"] = self._curve_payload(aligned_measured)
+        payload["aligned_simulated"] = self._curve_payload(aligned_simulated)
+        payload["mse"] = self._finite_or_none(plain_mse(measured_df, simulated_df))
+        return payload
+
+    @staticmethod
+    def _precision_row_payload(row: Any) -> Dict[str, Any]:
+        return {
+            "fixed_cds": list(getattr(row, "fixed_cds", []) or []),
+            "float_cds": list(getattr(row, "float_cds", []) or []),
+            "target_cds": list(getattr(row, "target_cds", []) or []),
+            "target_precision_3sigma": dict(getattr(row, "target_precision_3sigma", {}) or {}),
+            "score": float(getattr(row, "score", 0.0) or 0.0),
+            "gof": float(getattr(row, "gof", 0.0) or 0.0),
+            "precision_3sigma": OCDOptimizer._finite_or_none(getattr(row, "precision_3sigma", None)),
+            "lbh": float(getattr(row, "lbh", 0.0) or 0.0),
+            "passed": bool(getattr(row, "passed", False)),
+        }
 
     def _resolve_case_data_root(self, schema: Dict[str, Any]) -> Path:
         return self._resolve_case_root(schema) / "data"
@@ -605,6 +728,9 @@ class OCDOptimizer:
         case_root = self._resolve_case_root(schema)
         results_root = case_root / "Results"
         seed_search_root = results_root / "seed_search"
+        fitting_root = results_root / "fitting"
+        precision_root = results_root / "precision"
+        final_regression_root = results_root / "final_regression"
         sensitivity_root = results_root / "sensitivity"
         fitting_spec_type = self._fitting_spec_type(schema)
         precision_spec_type = self._precision_spec_type(schema, fitting_spec_type)
@@ -633,6 +759,9 @@ class OCDOptimizer:
             "data_root": str(data_root),
             "results_root": str(results_root),
             "seed_search_root": str(seed_search_root),
+            "fitting_root": str(fitting_root),
+            "precision_root": str(precision_root),
+            "final_regression_root": str(final_regression_root),
             "sensitivity_root": str(sensitivity_root),
             "fitting_spec_type": fitting_spec_type,
             "precision_spec_type": precision_spec_type,
@@ -728,12 +857,75 @@ class OCDOptimizer:
                         "seed_id": seed.seed_id,
                     },
                 )
+                fitting_seed_dir = fitting_root / f"coupling_{coupling_idx:02d}"
+                fitting_event_file = fitting_seed_dir / f"{seed.seed_id}.events.jsonl"
+                fitting_latest_file = fitting_seed_dir / f"{seed.seed_id}.latest.json"
+                fitting_summary_file = fitting_seed_dir / f"{seed.seed_id}.summary.json"
+
+                def _on_fitting_step(evt: Dict[str, Any]) -> None:
+                    evt_payload = dict(evt)
+                    model_snapshot = evt_payload.get("model_json")
+                    if isinstance(model_snapshot, dict):
+                        evt_payload["nk_snapshot"] = self._nk_snapshot(model_snapshot)
+                        evt_payload["spectrum_fit"] = self._spectrum_fit_payload(
+                            model_json=model_snapshot,
+                            model_id=self.cfg.model_id,
+                            measured_path=baseline_spec_paths[0],
+                        )
+                    payload = {
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "coupling_index": coupling_idx,
+                        "coupling_expression": expression,
+                        "seed_index": seed_idx,
+                        "seed_id": seed.seed_id,
+                        "event": evt_payload,
+                    }
+                    self._append_jsonl(fitting_event_file, payload)
+                    self._write_json(fitting_latest_file, payload)
+
                 fit_result = run_fitting(
                     seed_model_json=seed.model_json,
                     fitting_config=fitting_config,
                     model_id=self.cfg.model_id,
                     spec_paths=baseline_fit_paths,
                     hpc_client=self.cfg.hpc_client,
+                    step_cb=_on_fitting_step,
+                )
+                fitting_spectrum = self._spectrum_fit_payload(
+                    model_json=fit_result.model_json,
+                    model_id=self.cfg.model_id,
+                    measured_path=baseline_spec_paths[0],
+                )
+                self._write_json(
+                    fitting_summary_file,
+                    {
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "coupling_index": coupling_idx,
+                        "coupling_expression": expression,
+                        "seed_index": seed_idx,
+                        "seed_id": seed.seed_id,
+                        "best_gof": fit_result.best_gof,
+                        "best_residual": fit_result.best_residual,
+                        "best_lbh": fit_result.best_lbh,
+                        "best_score": fit_result.best_score,
+                        "step_count": len(fit_result.steps),
+                        "stopped_early": bool(fit_result.best_gof >= float(fitting_config.early_stop_gof)),
+                        "model_json": fit_result.model_json,
+                        "nk_snapshot": self._nk_snapshot(fit_result.model_json),
+                        "spectrum_fit": fitting_spectrum,
+                        "steps": [
+                            {
+                                "step_name": s.step_name,
+                                "accepted": s.accepted,
+                                "score_before": s.score_before,
+                                "score_after": s.score_after,
+                                "gof": s.gof,
+                                "residual": s.residual,
+                                "message": s.message,
+                            }
+                            for s in fit_result.steps
+                        ],
+                    },
                 )
                 debug["fitting"].append(
                     {
@@ -744,6 +936,9 @@ class OCDOptimizer:
                         "best_lbh": fit_result.best_lbh,
                         "best_score": fit_result.best_score,
                         "step_count": len(fit_result.steps),
+                        "events_path": str(fitting_event_file),
+                        "latest_path": str(fitting_latest_file),
+                        "summary_path": str(fitting_summary_file),
                     }
                 )
                 seed_baseline_gof = fit_result.best_gof
@@ -753,6 +948,36 @@ class OCDOptimizer:
                     model_id=self.cfg.model_id,
                     precision_config=precision_config,
                     hpc_client=self.cfg.hpc_client,
+                )
+                precision_seed_dir = precision_root / f"coupling_{coupling_idx:02d}"
+                precision_summary_file = precision_seed_dir / f"{seed.seed_id}.summary.json"
+                self._write_json(
+                    precision_summary_file,
+                    {
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "coupling_index": coupling_idx,
+                        "coupling_expression": expression,
+                        "seed_index": seed_idx,
+                        "seed_id": seed.seed_id,
+                        "baseline_case": self._precision_row_payload(precision_result.baseline_case),
+                        "selected_case": self._precision_row_payload(precision_result.selected_case),
+                        "one_d_fix_table": [self._precision_row_payload(r) for r in precision_result.one_d_fix_table],
+                        "two_d_fix_table": [self._precision_row_payload(r) for r in precision_result.two_d_fix_table],
+                        "rows": [self._precision_row_payload(r) for r in precision_result.rows],
+                        "grid_fix_cds": list(precision_result.grid_fix_cds),
+                        "baseline_gof": float(precision_result.baseline_gof),
+                        "baseline_precision_3sigma": float(precision_result.baseline_precision_3sigma),
+                        "selected_precision_3sigma": float(precision_result.selected_precision_3sigma),
+                        "selected_lbh": float(precision_result.selected_lbh),
+                        "selected_case_passed": bool(precision_result.selected_case_passed),
+                        "summary": precision_result.summary,
+                        "fitting_spectrum": self._spectrum_fit_payload(
+                            model_json=fit_result.model_json,
+                            model_id=self.cfg.model_id,
+                            measured_path=baseline_spec_paths[0],
+                        ),
+                        "nk_snapshot": self._nk_snapshot(fit_result.model_json),
+                    },
                 )
                 debug["precision"].append(
                     {
@@ -772,6 +997,7 @@ class OCDOptimizer:
                         "selected_lbh": precision_result.selected_lbh,
                         "selected_case_passed": precision_result.selected_case_passed,
                         "summary": precision_result.summary,
+                        "summary_path": str(precision_summary_file),
                     }
                 )
 
@@ -797,6 +1023,8 @@ class OCDOptimizer:
                         "interval_count": len(sensitivity_result.intervals),
                         "per_cd_count": len(sensitivity_result.per_cd_curves),
                         "artifact_path": str(sensitivity_root / f"coupling_{coupling_idx:02d}" / f"{seed.seed_id}.json"),
+                        "events_path": str((sensitivity_root / f"coupling_{coupling_idx:02d}" / f"{seed.seed_id}.json").with_suffix(".events.jsonl")),
+                        "latest_path": str((sensitivity_root / f"coupling_{coupling_idx:02d}" / f"{seed.seed_id}.json").with_suffix(".latest.json")),
                     }
                 )
 
@@ -816,6 +1044,10 @@ class OCDOptimizer:
 
                     grid_model = apply_grid_fix_values(fit_result.model_json, grid_combo)
                     target_cds = list(precision_result.baseline_case.target_cds or precision_config.target_cds)
+                    final_reg_seed_dir = final_regression_root / f"coupling_{coupling_idx:02d}" / seed.seed_id
+                    final_reg_event_file = final_reg_seed_dir / f"grid_{grid_idx:03d}.events.jsonl"
+                    final_reg_latest_file = final_reg_seed_dir / f"grid_{grid_idx:03d}.latest.json"
+                    final_reg_summary_file = final_reg_seed_dir / f"grid_{grid_idx:03d}.summary.json"
 
                     def _kpi_evaluator(
                         model_for_kpi: Dict[str, Any],
@@ -842,11 +1074,12 @@ class OCDOptimizer:
                             target_precision_thresholds=precision_config.target_precision_thresholds,
                             default_precision_threshold=precision_config.precision_threshold,
                         )
-                        precision_metric = (
+                        precision_metric_raw = (
                             float(max(precision_eval["target_precision_3sigma"].values()))
                             if precision_eval["target_precision_3sigma"]
                             else float("inf")
                         )
+                        precision_metric = self._finite_or_none(precision_metric_raw)
                         passed = bool(reg_passed and precision_eval["passed"])
                         return {
                             "passed": passed,
@@ -866,6 +1099,29 @@ class OCDOptimizer:
                             "precision_metric": precision_metric,
                         }
 
+                    def _on_final_reg_event(evt: Dict[str, Any]) -> None:
+                        evt_payload = dict(evt)
+                        model_snapshot = evt_payload.get("model_json")
+                        if isinstance(model_snapshot, dict):
+                            evt_payload["nk_snapshot"] = self._nk_snapshot(model_snapshot)
+                            evt_payload["spectrum_fit"] = self._spectrum_fit_payload(
+                                model_json=model_snapshot,
+                                model_id=self.cfg.model_id,
+                                measured_path=baseline_spec_paths[0],
+                            )
+                        payload = {
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "coupling_index": coupling_idx,
+                            "coupling_expression": expression,
+                            "seed_index": seed_idx,
+                            "seed_id": seed.seed_id,
+                            "grid_index": grid_idx,
+                            "grid": grid_combo,
+                            "event": evt_payload,
+                        }
+                        self._append_jsonl(final_reg_event_file, payload)
+                        self._write_json(final_reg_latest_file, payload)
+
                     final_stage = run_final_regression_stage_for_grid(
                         start_model_json=grid_model,
                         fitting_config=fitting_config,
@@ -876,6 +1132,20 @@ class OCDOptimizer:
                         ),
                         kpi_evaluator=_kpi_evaluator,
                         baseline_drop_limit_ratio=0.9,
+                        event_cb=_on_final_reg_event,
+                    )
+                    self._write_json(
+                        final_reg_summary_file,
+                        {
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "coupling_index": coupling_idx,
+                            "coupling_expression": expression,
+                            "seed_index": seed_idx,
+                            "seed_id": seed.seed_id,
+                            "grid_index": grid_idx,
+                            "grid": grid_combo,
+                            "final_stage": final_stage,
+                        },
                     )
 
                     debug_row: Dict[str, Any] = {
@@ -888,6 +1158,9 @@ class OCDOptimizer:
                         "final_baseline_residual": final_stage.get("final_baseline_residual"),
                         "final_baseline_lbh": final_stage.get("final_baseline_lbh"),
                         "history": final_stage.get("history", []),
+                        "events_path": str(final_reg_event_file),
+                        "latest_path": str(final_reg_latest_file),
+                        "summary_path": str(final_reg_summary_file),
                     }
                     if not final_stage.get("accepted"):
                         debug_row["accepted"] = False
@@ -899,7 +1172,7 @@ class OCDOptimizer:
                     regression_metrics = result_payload.get("regression_metrics", {})
                     regression_per_cd = result_payload.get("regression_per_cd", {})
                     precision_eval = result_payload.get("precision_eval", {})
-                    precision_metric = float(result_payload.get("precision_metric", float("inf")))
+                    precision_metric = self._finite_or_none(result_payload.get("precision_metric"))
                     final_model_json = result_payload.get("model_json", grid_model)
 
                     debug_row.update(

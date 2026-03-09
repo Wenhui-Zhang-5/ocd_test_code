@@ -416,6 +416,23 @@ def search_material_seeds(
                     "score": seed.score,
                 },
             )
+            _write_json(
+                persist_root / "latest.json",
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "processed_count": idx,
+                    "latest_seed_id": seed.seed_id,
+                    "latest_file": str(seed_file),
+                    "latest_metrics": {
+                        "gof": seed.gof,
+                        "residual": seed.residual,
+                        "correlation": seed.correlation,
+                        "lbh": seed.lbh,
+                        "mse": seed.mse,
+                        "score": seed.score,
+                    },
+                },
+            )
             debug_row["artifact_path"] = str(seed_file)
         debug_rows.append(debug_row)
 

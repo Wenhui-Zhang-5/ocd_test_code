@@ -151,6 +151,50 @@ class MarkCompletedRequest(BaseModel):
     checkpoint_path: str = ""
 
 
+class RunEventItem(BaseModel):
+    id: int
+    run_id: str
+    event_type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class RunEventsResponse(BaseModel):
+    items: List[RunEventItem] = Field(default_factory=list)
+    next_after_id: int = 0
+
+
+class RunArtifactItem(BaseModel):
+    id: int
+    run_id: str
+    artifact_type: str
+    relative_path: str
+    abs_path: str
+    created_at: str = ""
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunArtifactsResponse(BaseModel):
+    items: List[RunArtifactItem] = Field(default_factory=list)
+
+
+class ResultFileItem(BaseModel):
+    relative_path: str
+    abs_path: str
+    size: int
+    modified_at: str
+
+
+class RunResultIndexResponse(BaseModel):
+    items: List[ResultFileItem] = Field(default_factory=list)
+
+
+class RunResultJsonResponse(BaseModel):
+    run_id: str
+    relative_path: str
+    data: Any
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -313,6 +357,32 @@ def _queue_position(conn: sqlite3.Connection, run_id: str) -> Optional[int]:
     if not row:
         return None
     return int(row[0])
+
+
+def _resolve_run_results_path(conn: sqlite3.Connection, run_id: str) -> Path:
+    row = _get_run_row(conn, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    root = Path(str(row["results_path"] or "")).expanduser().resolve()
+    if not str(root):
+        raise HTTPException(status_code=500, detail="run results path missing")
+    if not root.exists():
+        raise HTTPException(status_code=404, detail="run results path not found")
+    return root
+
+
+def _resolve_relative_file(base_dir: Path, relative_path: str) -> Path:
+    rel = _safe_relative_path(relative_path)
+    if not rel:
+        raise HTTPException(status_code=400, detail="relative_path is required")
+    candidate = (base_dir / rel).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="relative_path escapes run results directory") from exc
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="result file not found")
+    return candidate
 
 
 def _status_row_to_dict(row: sqlite3.Row, queue_position: Optional[int]) -> Dict[str, Any]:
@@ -885,6 +955,176 @@ def upload_artifacts(run_id: str, body: ArtifactUploadRequest):
 
     row = _get_run_row(_db(), run_id)
     return SimpleAckResponse(run_id=run_id, status=str(row["status"]) if row else "unknown")
+
+
+@router.get("/runs/{run_id}/events", response_model=RunEventsResponse)
+def list_run_events(
+    run_id: str,
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    conn = _db()
+    with _LOCK:
+        row = _get_run_row(conn, run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        rows = conn.execute(
+            """
+            SELECT id, run_id, event_type, payload_json, created_at
+            FROM optimization_events
+            WHERE run_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (run_id, int(after_id), int(limit)),
+        ).fetchall()
+
+    items: List[RunEventItem] = []
+    next_after_id = int(after_id)
+    for row in rows:
+        event_id = int(row["id"])
+        payload_text = str(row["payload_json"] or "{}")
+        try:
+            payload_obj = json.loads(payload_text)
+        except Exception:
+            payload_obj = {"raw": payload_text}
+        items.append(
+            RunEventItem(
+                id=event_id,
+                run_id=str(row["run_id"]),
+                event_type=str(row["event_type"]),
+                payload=payload_obj if isinstance(payload_obj, dict) else {"value": payload_obj},
+                created_at=str(row["created_at"] or ""),
+            )
+        )
+        next_after_id = event_id
+    return RunEventsResponse(items=items, next_after_id=next_after_id)
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=RunArtifactsResponse)
+def list_run_artifacts(run_id: str):
+    conn = _db()
+    with _LOCK:
+        row = _get_run_row(conn, run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        rows = conn.execute(
+            """
+            SELECT id, run_id, artifact_type, relative_path, abs_path, created_at, meta_json
+            FROM optimization_artifacts
+            WHERE run_id = ?
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+
+    items: List[RunArtifactItem] = []
+    for row in rows:
+        meta_text = str(row["meta_json"] or "{}")
+        try:
+            meta_obj = json.loads(meta_text)
+        except Exception:
+            meta_obj = {"raw": meta_text}
+        items.append(
+            RunArtifactItem(
+                id=int(row["id"]),
+                run_id=str(row["run_id"]),
+                artifact_type=str(row["artifact_type"] or ""),
+                relative_path=str(row["relative_path"] or ""),
+                abs_path=str(row["abs_path"] or ""),
+                created_at=str(row["created_at"] or ""),
+                meta=meta_obj if isinstance(meta_obj, dict) else {"value": meta_obj},
+            )
+        )
+    return RunArtifactsResponse(items=items)
+
+
+@router.get("/runs/{run_id}/results/index", response_model=RunResultIndexResponse)
+def list_run_result_files(
+    run_id: str,
+    prefix: str = Query(default=""),
+    contains: str = Query(default=""),
+    suffix: str = Query(default=""),
+    limit: int = Query(default=1000, ge=1, le=20000),
+):
+    conn = _db()
+    with _LOCK:
+        results_root = _resolve_run_results_path(conn, run_id)
+
+    prefix_norm = _safe_relative_path(prefix).strip()
+    contains_norm = str(contains or "").strip().lower()
+    suffixes = [token.strip().lower() for token in str(suffix or "").split(",") if token.strip()]
+
+    files: List[ResultFileItem] = []
+    for path in results_root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(results_root)).replace("\\", "/")
+        rel_low = rel.lower()
+        if prefix_norm and not rel.startswith(prefix_norm):
+            continue
+        if contains_norm and contains_norm not in rel_low:
+            continue
+        if suffixes and not any(rel_low.endswith(suf) for suf in suffixes):
+            continue
+        stat = path.stat()
+        modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        files.append(
+            ResultFileItem(
+                relative_path=rel,
+                abs_path=str(path.resolve()),
+                size=int(stat.st_size),
+                modified_at=modified_at,
+            )
+        )
+    files.sort(key=lambda item: item.modified_at, reverse=True)
+    return RunResultIndexResponse(items=files[: int(limit)])
+
+
+@router.get("/runs/{run_id}/results/json", response_model=RunResultJsonResponse)
+def get_run_result_json(
+    run_id: str,
+    relative_path: str = Query(default=""),
+    tail: int = Query(default=0, ge=0, le=5000),
+):
+    conn = _db()
+    with _LOCK:
+        results_root = _resolve_run_results_path(conn, run_id)
+
+    file_path = _resolve_relative_file(results_root, relative_path)
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".json":
+        text = file_path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(text)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"invalid json file: {exc}") from exc
+        return RunResultJsonResponse(
+            run_id=run_id,
+            relative_path=str(file_path.relative_to(results_root)).replace("\\", "/"),
+            data=data,
+        )
+
+    if suffix == ".jsonl":
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+        if tail > 0 and len(lines) > tail:
+            lines = lines[-tail:]
+        parsed: List[Any] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                parsed.append(json.loads(line))
+            except Exception:
+                parsed.append({"raw": line})
+        return RunResultJsonResponse(
+            run_id=run_id,
+            relative_path=str(file_path.relative_to(results_root)).replace("\\", "/"),
+            data=parsed,
+        )
+
+    raise HTTPException(status_code=400, detail="only .json or .jsonl file is supported")
 
 
 @router.post("/runs/{run_id}/complete", response_model=SimpleAckResponse)

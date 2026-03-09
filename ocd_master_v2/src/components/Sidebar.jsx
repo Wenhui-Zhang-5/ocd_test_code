@@ -36,7 +36,7 @@ export default function Sidebar({ currentPath }) {
         ))}
       </nav>
       <div className="sidebar-footer">
-        <div className="chip">API: Mock Mode</div>
+        <div className="chip">API: Live</div>
         <div className="chip">Status: Ready</div>
       </div>
     </aside>

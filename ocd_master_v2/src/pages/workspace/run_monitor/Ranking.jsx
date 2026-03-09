@@ -1,17 +1,58 @@
-import React, { useEffect, useState } from "react";
-import { getRunDetail, startRunTicker } from "../../../data/mockApi.js";
+import React, { useEffect, useMemo, useState } from "react";
+import { isOptimizationApiEnabled, subscribeOptimizationEvents } from "../../../data/optimizationApi.js";
+import { buildRankingRowsFromFinalRegression, loadWorkspacePreferredRun } from "../../../data/optimizationView.js";
+import { NkChart, RegressionChart, SpectrumChart } from "../../../components/OptimizationCharts.jsx";
 
 export default function MonitorRanking({ workspaceId }) {
-  const [detail, setDetail] = useState(() => getRunDetail(workspaceId));
+  const optimizationApiEnabled = isOptimizationApiEnabled();
+  const [run, setRun] = useState(null);
+  const [rows, setRows] = useState([]);
   const [expandedRow, setExpandedRow] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const loadData = async () => {
+    if (!optimizationApiEnabled) return;
+    setLoading(true);
+    try {
+      const preferredRun = await loadWorkspacePreferredRun(workspaceId);
+      setRun(preferredRun || null);
+      if (!preferredRun?.run_id) {
+        setRows([]);
+        setError("");
+        return;
+      }
+      const rankingRows = await buildRankingRowsFromFinalRegression(preferredRun.run_id);
+      setRows(rankingRows);
+      setError("");
+    } catch (err) {
+      setError(err?.message || "Failed to load ranking data");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    startRunTicker();
-    const interval = window.setInterval(() => {
-      setDetail({ ...getRunDetail(workspaceId) });
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [workspaceId]);
+    if (!optimizationApiEnabled) return undefined;
+    let active = true;
+    void loadData();
+    const unsubscribe = subscribeOptimizationEvents({
+      onEvent: () => {
+        if (!active) return;
+        void loadData();
+      },
+      onError: () => {
+        if (!active) return;
+        void loadData();
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [optimizationApiEnabled, workspaceId]);
+
+  const displayRows = useMemo(() => rows, [rows]);
 
   const toggleRow = (rowKey) => {
     setExpandedRow((prev) => (prev === rowKey ? null : rowKey));
@@ -23,101 +64,78 @@ export default function MonitorRanking({ workspaceId }) {
         <div>
           <p className="eyebrow">Run Monitor</p>
           <h2>Ranking</h2>
-          <p className="subtle">Live KPI ranking for active seeds.</p>
+          <p className="subtle">Real-time KPI ranking from final regression summaries.</p>
         </div>
       </header>
 
       <section className="panel">
         <div className="panel-header">
           <h3>Live Ranking</h3>
-          <span className="chip">Sorted by KPI</span>
+          <span className="chip">{run?.run_id ? `Run ${run.run_id}` : "No Run"}</span>
         </div>
+        {!optimizationApiEnabled ? (
+          <div className="panel-note">Optimization API is disabled by env. Enable `VITE_ENABLE_OPTIMIZATION_API=1`.</div>
+        ) : null}
+        {error ? <div className="panel-note">{error}</div> : null}
+        {loading ? <div className="panel-note">Loading ranking...</div> : null}
         <div className="table">
           <div className="table-row table-head">
             <span>Rank</span>
             <span>Scheme</span>
             <span>Seed</span>
-            <span>Iteration</span>
+            <span>Grid</span>
             <span>R2</span>
             <span>Slope</span>
-            <span>Side-by-side (nm)</span>
+            <span>Side-by-side</span>
             <span>Precision</span>
-            <span>Status</span>
+            <span>LBH</span>
             <span></span>
           </div>
-          {detail.ranking.map((row) => (
-            <React.Fragment key={`${row.seedId}-${row.rank}`}>
+          {displayRows.map((row) => (
+            <React.Fragment key={`${row.relativePath}-${row.rank}`}>
               <div className="table-row">
                 <span>{row.rank}</span>
-                <span>{row.couplingScheme || "-"}</span>
-                <span>{row.seedId}</span>
-                <span>{row.iteration ?? "-"}</span>
+                <span>{row.couplingExpression || "-"}</span>
+                <span>{row.seedId || "-"}</span>
+                <span>{row.gridIndex ?? "-"}</span>
                 <span>{row.r2 ?? "-"}</span>
                 <span>{row.slope ?? "-"}</span>
-                <span>{row.sideBySideNm ?? "-"}</span>
+                <span>{row.sideBySide ?? "-"}</span>
                 <span>{row.precision ?? "-"}</span>
-                <span className="chip">{row.status}</span>
-                <button
-                  className="ghost-button"
-                  onClick={() => toggleRow(`${row.couplingScheme}-${row.seedId}`)}
-                >
-                  {expandedRow === `${row.couplingScheme}-${row.seedId}` ? "Hide Detail" : "Check Detail"}
+                <span>{row.lbh ?? "-"}</span>
+                <button className="ghost-button" onClick={() => toggleRow(`${row.relativePath}-${row.rank}`)}>
+                  {expandedRow === `${row.relativePath}-${row.rank}` ? "Hide Detail" : "Check Detail"}
                 </button>
               </div>
-              {expandedRow === `${row.couplingScheme}-${row.seedId}` && (
+              {expandedRow === `${row.relativePath}-${row.rank}` ? (
                 <div className="table-row detail-row">
                   <div className="ranking-detail">
                     <div className="detail-header">
-                      <span>Detail: {row.couplingScheme} / {row.seedId}</span>
-                      <span className="chip chip-muted">Iteration {row.iteration}</span>
+                      <span>{row.relativePath}</span>
+                      <span className="chip chip-muted">{row.modifiedAt || "-"}</span>
                     </div>
-                    <div className="table kpi-table">
-                      <div className="table-row table-head">
-                        <span>KPI</span>
-                        <span>R2</span>
-                        <span>Slope</span>
-                        <span>SBS</span>
-                        <span>Precision</span>
-                      </div>
-                      <div className="table-row">
-                        <span>KPI1</span>
-                        <span>{row.r2 ?? "-"}</span>
-                        <span>{row.slope ?? "-"}</span>
-                        <span>{row.sideBySideNm ?? "-"}</span>
-                        <span>{row.precision ?? "-"}</span>
-                      </div>
-                    </div>
-                    <div className="detail-section">
-                      <div className="detail-section-header">Linear Plots</div>
-                      <div className="detail-scroll">
-                        {Array.from({ length: 4 }).map((_, index) => (
-                          <div className="plot-placeholder" key={`linear-${index}`}>
-                            Linear Plot {row.artifacts?.linearPlotId || "-"}-{index + 1}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="detail-section">
-                      <div className="detail-section-header">NK Curves</div>
-                      <div className="detail-scroll nk-scroll">
-                        {Array.from({ length: 6 }).map((_, index) => (
-                          <div className="plot-placeholder" key={`nk-${index}`}>
-                            NK Curve {row.artifacts?.nkPlotId || "-"}-{index + 1}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="detail-section">
-                      <div className="detail-section-header">Spectrum Fitting</div>
-                      <div className="plot-placeholder">
-                        Spectrum Fitting {row.artifacts?.fittingPlotId || "-"}
-                      </div>
-                    </div>
+                    <SpectrumChart spectrumFit={row.spectrumFit} />
+                    <RegressionChart regressionPerCd={row.regressionPerCd} />
+                    <NkChart nkSnapshot={row.nkSnapshot} />
                   </div>
                 </div>
-              )}
+              ) : null}
             </React.Fragment>
           ))}
+          {!displayRows.length && !loading ? (
+            <div className="table-row">
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>No ranking data yet</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+            </div>
+          ) : null}
         </div>
       </section>
     </div>

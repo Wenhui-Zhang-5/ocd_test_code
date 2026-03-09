@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ocd_algorithm_api.ocd_auto_opt.api.run_hpc import HPCAPIError, HPCClient
 from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import (
@@ -10,6 +10,9 @@ from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import (
     sync_new_fields_from_nominal_value,
 )
 from ocd_algorithm_api.ocd_auto_opt.utils.parse_hpc_result import best_record, parse_hpc_result, record_score
+
+
+StepCallback = Callable[[Dict[str, Any]], None]
 
 
 @dataclass
@@ -118,7 +121,16 @@ def run_fitting(
     model_id: str,
     spec_paths: List[str],
     hpc_client: Optional[HPCClient],
+    step_cb: Optional[StepCallback] = None,
 ) -> FittingResult:
+    def _emit(payload: Dict[str, Any]) -> None:
+        if step_cb is None:
+            return
+        try:
+            step_cb(payload)
+        except Exception:
+            return
+
     steps = _extract_steps(fitting_config)
     fit_iterations = max(1, int(fitting_config.fitting_iteration or 1))
 
@@ -136,6 +148,16 @@ def run_fitting(
     best_gof = gof
     best_residual = residual
     best_lbh = lbh
+    _emit(
+        {
+            "kind": "init",
+            "best_score": best_score,
+            "best_gof": best_gof,
+            "best_residual": best_residual,
+            "best_lbh": best_lbh,
+            "model_json": current_model,
+        }
+    )
 
     stop_early = False
     for iteration_idx in range(1, fit_iterations + 1):
@@ -174,12 +196,32 @@ def run_fitting(
                     message=message,
                 )
             )
+            _emit(
+                {
+                    "kind": "step",
+                    "iteration": iteration_idx,
+                    "material": material_name,
+                    "step": step_name,
+                    "accepted": accepted,
+                    "score_before": score,
+                    "score_after": new_score,
+                    "gof": new_gof,
+                    "residual": new_residual,
+                    "lbh": new_lbh,
+                    "best_score": best_score,
+                    "best_gof": best_gof,
+                    "best_residual": best_residual,
+                    "best_lbh": best_lbh,
+                    "message": message,
+                    "model_json": fitted_model,
+                }
+            )
             score = best_score
             if best_gof >= float(fitting_config.early_stop_gof):
                 stop_early = True
                 break
 
-    return FittingResult(
+    result = FittingResult(
         model_json=current_model,
         best_score=best_score,
         best_gof=best_gof,
@@ -187,3 +229,15 @@ def run_fitting(
         best_lbh=best_lbh,
         steps=history,
     )
+    _emit(
+        {
+            "kind": "completed",
+            "best_score": result.best_score,
+            "best_gof": result.best_gof,
+            "best_residual": result.best_residual,
+            "best_lbh": result.best_lbh,
+            "step_count": len(result.steps),
+            "model_json": result.model_json,
+        }
+    )
+    return result

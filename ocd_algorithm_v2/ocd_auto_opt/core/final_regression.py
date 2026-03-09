@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ocd_algorithm_api.ocd_auto_opt.core.fitting import FittingConfig
 from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import set_basis_float_flags, set_material_float_targets
@@ -8,6 +8,7 @@ from ocd_algorithm_api.ocd_auto_opt.utils.model_utils import set_basis_float_fla
 
 BaselineFitFn = Callable[[Dict[str, Any]], Tuple[Dict[str, Any], float, float, float, str]]
 KPIEvalFn = Callable[[Dict[str, Any], int, str, str, float], Dict[str, Any]]
+EventCallback = Callable[[Dict[str, Any]], None]
 
 
 def _final_stage_steps(fitting_config: FittingConfig) -> List[Tuple[str, str, List[Tuple[str, str, str]]]]:
@@ -53,18 +54,27 @@ def run_final_regression_stage_for_grid(
     baseline_fit_once: BaselineFitFn,
     kpi_evaluator: KPIEvalFn,
     baseline_drop_limit_ratio: float = 0.9,
+    event_cb: Optional[EventCallback] = None,
 ) -> Dict[str, Any]:
+    def _emit(payload: Dict[str, Any]) -> None:
+        if event_cb is None:
+            return
+        try:
+            event_cb(payload)
+        except Exception:
+            return
+
     current_model = set_basis_float_flags(start_model_json, fitting_config.must_float_cds)
     current_gof: float | None = None
     current_residual: float | None = None
     current_lbh: float | None = None
 
-    history: List[Dict[str, Any]] = [
-        {
-            "kind": "init",
-            "message": "grid values applied",
-        }
-    ]
+    init_event = {
+        "kind": "init",
+        "message": "grid values applied",
+    }
+    history: List[Dict[str, Any]] = [init_event]
+    _emit(init_event)
 
     steps = _final_stage_steps(fitting_config)
     fit_iterations = max(1, int(fitting_config.fitting_iteration or 1))
@@ -81,6 +91,7 @@ def run_final_regression_stage_for_grid(
                         "reason": "no_targets",
                     }
                 )
+                _emit(history[-1])
                 continue
 
             candidate = set_basis_float_flags(current_model, fitting_config.must_float_cds)
@@ -96,12 +107,14 @@ def run_final_regression_stage_for_grid(
                 "baseline_residual_new": step_residual,
                 "baseline_lbh_new": step_lbh,
                 "message": step_msg,
+                "model_json": fitted_model,
             }
 
             if current_gof is not None and step_gof < float(current_gof) * float(baseline_drop_limit_ratio):
                 row["accepted"] = False
                 row["reason"] = "baseline_gof_guard_failed"
                 history.append(row)
+                _emit(row)
                 continue
 
             current_model = set_basis_float_flags(fitted_model, fitting_config.must_float_cds)
@@ -110,6 +123,7 @@ def run_final_regression_stage_for_grid(
             current_lbh = float(step_lbh)
             row["accepted"] = True
             history.append(row)
+            _emit(row)
 
             if current_gof < float(fitting_config.early_stop_gof):
                 continue
@@ -122,11 +136,13 @@ def run_final_regression_stage_for_grid(
                     "material": material_name,
                     "step": step_name,
                     "baseline_gof": current_gof,
+                    "model_json": current_model,
                     "result": kpi_eval,
                 }
             )
+            _emit(history[-1])
             if bool(kpi_eval.get("passed")):
-                return {
+                accepted_payload = {
                     "accepted": True,
                     "history": history,
                     "result": {
@@ -140,8 +156,19 @@ def run_final_regression_stage_for_grid(
                     "final_baseline_residual": current_residual,
                     "final_baseline_lbh": current_lbh,
                 }
+                _emit(
+                    {
+                        "kind": "completed",
+                        "accepted": True,
+                        "model_json": current_model,
+                        "final_baseline_gof": current_gof,
+                        "final_baseline_residual": current_residual,
+                        "final_baseline_lbh": current_lbh,
+                    }
+                )
+                return accepted_payload
 
-    return {
+    rejected_payload = {
         "accepted": False,
         "reject_reason": "kpi_not_satisfied_after_final_stage_iterations",
         "history": history,
@@ -149,4 +176,15 @@ def run_final_regression_stage_for_grid(
         "final_baseline_residual": current_residual,
         "final_baseline_lbh": current_lbh,
     }
-
+    _emit(
+        {
+            "kind": "completed",
+            "accepted": False,
+            "model_json": current_model,
+            "reject_reason": rejected_payload["reject_reason"],
+            "final_baseline_gof": current_gof,
+            "final_baseline_residual": current_residual,
+            "final_baseline_lbh": current_lbh,
+        }
+    )
+    return rejected_payload

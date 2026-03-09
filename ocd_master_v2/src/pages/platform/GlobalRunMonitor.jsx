@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { listGlobalRuns } from "../../data/mockApi.js";
 import { isOptimizationApiEnabled, listOptimizationRuns, subscribeOptimizationEvents } from "../../data/optimizationApi.js";
 import { buildHashHref } from "../../router.js";
 
@@ -9,9 +8,12 @@ export default function GlobalRunMonitor() {
   const [activeTab, setActiveTab] = useState("all");
   const [apiRuns, setApiRuns] = useState([]);
   const [apiError, setApiError] = useState("");
+  const [loading, setLoading] = useState(false);
   const optimizationApiEnabled = isOptimizationApiEnabled();
 
   const loadApiRuns = async () => {
+    if (!optimizationApiEnabled) return;
+    setLoading(true);
     try {
       const payload = await listOptimizationRuns({ page: 1, pageSize: 500 });
       const mapped = Array.isArray(payload?.items)
@@ -32,6 +34,8 @@ export default function GlobalRunMonitor() {
       setApiError("");
     } catch (error) {
       setApiError(error?.message || "Failed to load optimization runs");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -55,8 +59,7 @@ export default function GlobalRunMonitor() {
     };
   }, [optimizationApiEnabled]);
 
-  const useMockFallback = !optimizationApiEnabled || (!!apiError && apiRuns.length === 0);
-  const allRuns = useMockFallback ? listGlobalRuns() : apiRuns;
+  const allRuns = apiRuns;
   const runs = allRuns.filter((run) => (activeTab === "all" ? true : run.status === activeTab));
   const counts = useMemo(() => {
     const byStatus = { running: 0, queued: 0, completed: 0 };
@@ -118,6 +121,10 @@ export default function GlobalRunMonitor() {
           </div>
         </div>
         {optimizationApiEnabled && apiError ? <div className="panel-note">{apiError}</div> : null}
+        {!optimizationApiEnabled ? (
+          <div className="panel-note">Optimization API is disabled by env. Enable `VITE_ENABLE_OPTIMIZATION_API=1`.</div>
+        ) : null}
+        {loading ? <div className="panel-note">Loading runs...</div> : null}
         <div className="table">
           <div className="table-row table-head">
             <span>Workspace</span>
@@ -149,7 +156,7 @@ export default function GlobalRunMonitor() {
               <span>{run.bestKPI}</span>
             </a>
           ))}
-          {!runs.length ? (
+          {!runs.length && !loading ? (
             <div className="table-row">
               <span>-</span>
               <span>-</span>

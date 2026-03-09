@@ -35,6 +35,12 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def _channels(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if c != "wavelength"]
 
@@ -217,6 +223,19 @@ def sensitivity_analysis(
                     "per_cd_curves": out_empty.per_cd_curves,
                 },
             )
+            empty_payload = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "kind": "completed",
+                "model_id": model_id,
+                "spec_type": spec_type,
+                "target_cds": [str(cd).strip() for cd in target_cds if str(cd).strip()],
+                "meta": persist_meta or {},
+                "wavelength_count": 0,
+                "interval_count": 0,
+                "warning": "baseline_empty",
+            }
+            _append_jsonl(Path(persist_path).with_suffix(".events.jsonl"), empty_payload)
+            _write_json(Path(persist_path).with_suffix(".latest.json"), empty_payload)
         return out_empty
 
     baseline_payload = _curve_payload(baseline_df)
@@ -226,6 +245,8 @@ def sensitivity_analysis(
     cds = [str(cd).strip() for cd in target_cds if str(cd).strip()]
     if not cds:
         cds = ["CD_DEFAULT"]
+    events_path = Path(persist_path).with_suffix(".events.jsonl") if persist_path is not None else None
+    latest_path = Path(persist_path).with_suffix(".latest.json") if persist_path is not None else None
 
     for cd_name in cds:
         minus_model = apply_basis_offsets(fitted_model_json, {cd_name: -abs(delta_nm)})
@@ -261,6 +282,19 @@ def sensitivity_analysis(
             "diff_plus": [float(v) for v in plus_curve.tolist()],
             "cd_sensitivity": [float(v) for v in cd_sensitivity.tolist()],
         }
+        if events_path is not None and latest_path is not None:
+            event_payload = {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "kind": "cd_done",
+                "model_id": model_id,
+                "spec_type": spec_type,
+                "cd_name": cd_name,
+                "meta": persist_meta or {},
+                "baseline_spectrum": baseline_payload,
+                "per_cd_curves": {cd_name: per_cd_curves[cd_name]},
+            }
+            _append_jsonl(events_path, event_payload)
+            _write_json(latest_path, event_payload)
 
         # Ensure same length by clipping to the shortest after alignment.
         if total.size == 0:
@@ -310,4 +344,16 @@ def sensitivity_analysis(
                 "per_cd_curves": output.per_cd_curves,
             },
         )
+        completed_payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "kind": "completed",
+            "model_id": model_id,
+            "spec_type": spec_type,
+            "target_cds": cds,
+            "meta": persist_meta or {},
+            "wavelength_count": len(output.wavelengths),
+            "interval_count": len(output.intervals),
+        }
+        _append_jsonl(Path(persist_path).with_suffix(".events.jsonl"), completed_payload)
+        _write_json(Path(persist_path).with_suffix(".latest.json"), completed_payload)
     return output

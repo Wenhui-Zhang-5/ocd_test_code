@@ -1,115 +1,98 @@
-import React, { useMemo, useState } from "react";
-import { addTemplateEntry, getWorkspace, loadRecipeSchema } from "../../../data/mockApi.js";
+import React, { useEffect, useMemo, useState } from "react";
+import { isOptimizationApiEnabled, subscribeOptimizationEvents } from "../../../data/optimizationApi.js";
+import { buildRankingRowsFromFinalRegression, loadWorkspacePreferredRun } from "../../../data/optimizationView.js";
+import { NkChart, RegressionChart, SpectrumChart } from "../../../components/OptimizationCharts.jsx";
+
+const downloadJson = (filename, payload) => {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+};
 
 export default function ResultsSummary({ workspaceId }) {
+  const optimizationApiEnabled = isOptimizationApiEnabled();
+  const [run, setRun] = useState(null);
+  const [rows, setRows] = useState([]);
   const [expandedRow, setExpandedRow] = useState(null);
-  const [finalVersion, setFinalVersion] = useState("v2");
-  const [finalRank, setFinalRank] = useState("1");
-  const [templateRank, setTemplateRank] = useState("1");
-  const [templateName, setTemplateName] = useState("");
-  const [templateComment, setTemplateComment] = useState("");
-  const [templateRows, setTemplateRows] = useState([]);
+  const [selectedRank, setSelectedRank] = useState("1");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const results = useMemo(
-    () => [
-      {
-        rank: 1,
-        scheme: "CS-A",
-        seed: "S2",
-        iteration: 12,
-        r2: 0.991,
-        slope: 1.01,
-        sbs: 0.82,
-        precision: 0.35,
-        pass: true
-      },
-      {
-        rank: 2,
-        scheme: "CS-A",
-        seed: "S1",
-        iteration: 11,
-        r2: 0.985,
-        slope: 1.02,
-        sbs: 0.91,
-        precision: 0.42,
-        pass: true
-      },
-      {
-        rank: 3,
-        scheme: "CS-B",
-        seed: "S3",
-        iteration: 9,
-        r2: 0.972,
-        slope: 0.98,
-        sbs: 1.12,
-        precision: 0.56,
-        pass: false
-      },
-      {
-        rank: 4,
-        scheme: "CS-B",
-        seed: "S4",
-        iteration: 8,
-        r2: 0.965,
-        slope: 0.96,
-        sbs: 1.25,
-        precision: 0.63,
-        pass: false
+  const loadData = async () => {
+    if (!optimizationApiEnabled) return;
+    setLoading(true);
+    try {
+      const preferredRun = await loadWorkspacePreferredRun(workspaceId);
+      setRun(preferredRun || null);
+      if (!preferredRun?.run_id) {
+        setRows([]);
+        setError("");
+        return;
       }
-    ],
-    []
-  );
+      const rankingRows = await buildRankingRowsFromFinalRegression(preferredRun.run_id);
+      setRows(rankingRows);
+      if (rankingRows.length > 0) {
+        setSelectedRank((prev) => {
+          const valid = rankingRows.some((row) => String(row.rank) === String(prev));
+          return valid ? prev : String(rankingRows[0].rank);
+        });
+      } else {
+        setSelectedRank("1");
+      }
+      setError("");
+    } catch (err) {
+      setError(err?.message || "Failed to load result summary");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const passingResults = results.filter((item) => item.pass);
-  const displayResults = passingResults.length ? passingResults : results.slice(0, 10);
-  const versions = ["v1", "v2", "v3"];
+  useEffect(() => {
+    if (!optimizationApiEnabled) return undefined;
+    let active = true;
+    void loadData();
+    const unsubscribe = subscribeOptimizationEvents({
+      onEvent: () => {
+        if (!active) return;
+        void loadData();
+      },
+      onError: () => {
+        if (!active) return;
+        void loadData();
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [optimizationApiEnabled, workspaceId]);
+
+  const passingRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const precisionGate = row.precisionPassed !== false;
+        const targetPassed = Object.values(row.targetPassed || {}).every(Boolean);
+        return precisionGate && targetPassed;
+      }),
+    [rows]
+  );
+  const displayRows = passingRows.length ? passingRows : rows.slice(0, 10);
+  const selectedRow = displayRows.find((row) => String(row.rank) === String(selectedRank)) || displayRows[0] || null;
 
   const toggleRow = (rowKey) => {
     setExpandedRow((prev) => (prev === rowKey ? null : rowKey));
   };
 
-  const handleAddTemplate = () => {
-    const target = displayResults.find((row) => String(row.rank) === String(templateRank));
-    if (!target || !templateName.trim()) return;
-    const schema = loadRecipeSchema(workspaceId) || {};
-    const workspace = getWorkspace(workspaceId) || {};
-    const recipeMeta = {
-      recipeName: schema.recipeName || workspace.recipeName || "",
-      project: schema.project || workspace.project || "",
-      productId: schema.productID || schema.productId || workspace.productId || "",
-      owner: schema.owner || workspace.owner || "",
-      version: schema.version || workspace.version || "",
-      modelId: schema.modelID || workspace.modelID || ""
-    };
-    const record = addTemplateEntry({
-      templateName: templateName.trim(),
-      templateComment: templateComment.trim(),
-      couplingScheme: target.scheme,
-      modelId: recipeMeta.modelId,
-      recipeMeta,
-      recipeSchemaJson: schema
-    });
-    setTemplateRows((prev) => [
-      ...prev,
-      {
-        id: record.templateId,
-        rank: target.rank,
-        scheme: target.scheme,
-        seed: target.seed,
-        name: templateName.trim(),
-        comment: templateComment.trim(),
-        recipeName: recipeMeta.recipeName,
-        project: recipeMeta.project,
-        productId: recipeMeta.productId,
-        owner: recipeMeta.owner
-      }
-    ]);
-    setTemplateName("");
-    setTemplateComment("");
-  };
-
-  const removeTemplateRow = (id) => {
-    setTemplateRows((prev) => prev.filter((row) => row.id !== id));
+  const handleDownloadModelJson = () => {
+    if (!selectedRow?.modelJson) return;
+    const fileName = `${workspaceId || "workspace"}_rank_${selectedRow.rank}_model.json`;
+    downloadJson(fileName, selectedRow.modelJson);
   };
 
   return (
@@ -118,142 +101,109 @@ export default function ResultsSummary({ workspaceId }) {
         <div>
           <p className="eyebrow">Results</p>
           <h2>Summary</h2>
-          <p className="subtle">Final KPI and best result for {workspaceId}.</p>
+          <p className="subtle">Real ranking and solution summary from final regression outputs.</p>
         </div>
-        <div />
       </header>
 
       <section className="panel">
         <div className="panel-header">
           <h3>Qualified Ranking</h3>
           <span className="chip">
-            {passingResults.length ? "KPI Passed" : "Top 10 (no pass)"}
+            {run?.run_id ? `Run ${run.run_id}` : "No Run"}
           </span>
         </div>
+        {!optimizationApiEnabled ? (
+          <div className="panel-note">Optimization API is disabled by env. Enable `VITE_ENABLE_OPTIMIZATION_API=1`.</div>
+        ) : null}
+        {error ? <div className="panel-note">{error}</div> : null}
+        {loading ? <div className="panel-note">Loading summary...</div> : null}
         <div className="table">
           <div className="table-row table-head">
             <span>Rank</span>
             <span>Scheme</span>
             <span>Seed</span>
-            <span>Iteration</span>
+            <span>Grid</span>
             <span>R2</span>
             <span>Slope</span>
-            <span>Side-by-side (nm)</span>
+            <span>Side-by-side</span>
             <span>Precision</span>
             <span></span>
           </div>
-          {displayResults.map((row) => (
-            <React.Fragment key={`${row.scheme}-${row.seed}-${row.rank}`}>
+          {displayRows.map((row) => (
+            <React.Fragment key={`${row.relativePath}-${row.rank}`}>
               <div className="table-row">
                 <span>{row.rank}</span>
-                <span>{row.scheme}</span>
-                <span>{row.seed}</span>
-                <span>{row.iteration}</span>
-                <span>{row.r2}</span>
-                <span>{row.slope}</span>
-                <span>{row.sbs}</span>
-                <span>{row.precision}</span>
+                <span>{row.couplingExpression || "-"}</span>
+                <span>{row.seedId || "-"}</span>
+                <span>{row.gridIndex ?? "-"}</span>
+                <span>{row.r2 ?? "-"}</span>
+                <span>{row.slope ?? "-"}</span>
+                <span>{row.sideBySide ?? "-"}</span>
+                <span>{row.precision ?? "-"}</span>
                 <button
                   className="ghost-button"
-                  onClick={() => toggleRow(`${row.scheme}-${row.seed}-${row.rank}`)}
+                  onClick={() => toggleRow(`${row.relativePath}-${row.rank}`)}
                 >
-                  {expandedRow === `${row.scheme}-${row.seed}-${row.rank}` ? "Hide Detail" : "Check Detail"}
+                  {expandedRow === `${row.relativePath}-${row.rank}` ? "Hide Detail" : "Check Detail"}
                 </button>
               </div>
-              {expandedRow === `${row.scheme}-${row.seed}-${row.rank}` && (
+              {expandedRow === `${row.relativePath}-${row.rank}` ? (
                 <div className="table-row detail-row">
                   <div className="ranking-detail">
-                    <div className="detail-grid">
-                      <div className="plot-placeholder">NK Curve Placeholder</div>
-                      <div className="plot-placeholder">Fitting Curve Placeholder</div>
-                      <div className="plot-placeholder">Linear Plot Placeholder</div>
-                    </div>
+                    <div className="panel-note">Grid: {JSON.stringify(row.grid || {})}</div>
+                    <SpectrumChart spectrumFit={row.spectrumFit} />
+                    <RegressionChart regressionPerCd={row.regressionPerCd} />
+                    <NkChart nkSnapshot={row.nkSnapshot} />
                   </div>
                 </div>
-              )}
+              ) : null}
             </React.Fragment>
           ))}
+          {!displayRows.length && !loading ? (
+            <div className="table-row">
+              <span>-</span>
+              <span>-</span>
+              <span>No results yet</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+            </div>
+          ) : null}
         </div>
       </section>
 
       <section className="panel">
         <div className="panel-header">
           <h3>Final Selection</h3>
-          <button className="ghost-button">Download Model JSON</button>
+          <button className="ghost-button" onClick={handleDownloadModelJson} disabled={!selectedRow?.modelJson}>
+            Download Model JSON
+          </button>
         </div>
         <div className="form-row">
           <label>Ranking</label>
-          <select value={finalRank} onChange={(event) => setFinalRank(event.target.value)}>
-            {displayResults.map((row) => (
-              <option key={`${row.scheme}-${row.seed}-${row.rank}`} value={String(row.rank)}>
-                #{row.rank} · {row.scheme} · {row.seed}
+          <select value={selectedRank} onChange={(event) => setSelectedRank(event.target.value)} disabled={!displayRows.length}>
+            {displayRows.map((row) => (
+              <option key={`${row.relativePath}-${row.rank}`} value={String(row.rank)}>
+                #{row.rank} · {row.couplingExpression} · {row.seedId}
               </option>
             ))}
           </select>
         </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <h3>Selection for Template</h3>
-          <button className="ghost-button" onClick={handleAddTemplate}>Add to Template List</button>
-        </div>
-        <div className="form-grid two-col">
-          <div className="form-row">
-            <label>Ranking</label>
-            <select value={templateRank} onChange={(event) => setTemplateRank(event.target.value)}>
-              {displayResults.map((row) => (
-                <option key={`${row.scheme}-${row.seed}-${row.rank}`} value={String(row.rank)}>
-                  #{row.rank} · {row.scheme} · {row.seed}
-                </option>
-              ))}
-            </select>
+        {selectedRow ? (
+          <div className="panel-note">
+            Selected: rank #{selectedRow.rank}, seed {selectedRow.seedId}, R2={selectedRow.r2 ?? "-"}, precision={selectedRow.precision ?? "-"}
           </div>
-          <div className="form-row">
-            <label>Template Name</label>
-            <input
-              type="text"
-              placeholder="Enter template name"
-              value={templateName}
-              onChange={(event) => setTemplateName(event.target.value)}
-            />
+        ) : null}
+        {selectedRow ? (
+          <div className="detail-grid">
+            <SpectrumChart spectrumFit={selectedRow.spectrumFit} title="Selected Spectrum Fit" />
+            <RegressionChart regressionPerCd={selectedRow.regressionPerCd} title="Selected Linear Regression" />
+            <NkChart nkSnapshot={selectedRow.nkSnapshot} title="Selected NK Parameters" />
           </div>
-          <div className="form-row">
-            <label>Comment</label>
-            <input
-              type="text"
-              placeholder="Optional comment"
-              value={templateComment}
-              onChange={(event) => setTemplateComment(event.target.value)}
-            />
-          </div>
-        </div>
-        <div className="table">
-          <div className="table-row table-head">
-            <span>Template Name</span>
-            <span>Rank</span>
-            <span>Scheme</span>
-            <span>Recipe Name</span>
-            <span>Project</span>
-            <span>Product</span>
-            <span>Owner</span>
-            <span>Comment</span>
-            <span></span>
-          </div>
-          {templateRows.map((row) => (
-            <div className="table-row" key={row.id}>
-              <span>{row.name}</span>
-              <span>{row.rank}</span>
-              <span>{row.scheme}</span>
-              <span>{row.recipeName || "-"}</span>
-              <span>{row.project || "-"}</span>
-              <span>{row.productId || "-"}</span>
-              <span>{row.owner || "-"}</span>
-              <span>{row.comment || "-"}</span>
-              <button className="ghost-button" onClick={() => removeTemplateRow(row.id)}>Remove</button>
-            </div>
-          ))}
-        </div>
+        ) : null}
       </section>
     </div>
   );
