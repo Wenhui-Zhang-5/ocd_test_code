@@ -15,8 +15,10 @@ from pydantic import BaseModel, Field
 
 try:
     from ocd_algorithm_api.config import OCD_BACKEND_DATA_DIR, OCD_CASE_ROOT, OCD_SPECTRUM_ROOT
+    from ocd_algorithm_api.routers.optimization import create_run_internal
 except Exception:  # pragma: no cover
     from config import OCD_BACKEND_DATA_DIR, OCD_CASE_ROOT, OCD_SPECTRUM_ROOT
+    from routers.optimization import create_run_internal
 
 router = APIRouter()
 
@@ -200,7 +202,10 @@ class StartOptimizationResponse(BaseModel):
     recipe_json_dir: str
     schema_path: str
     model_json_path: str
-    status: str = "ready"
+    run_id: str = ""
+    queue_position: int = 0
+    results_dir: str = ""
+    status: str = "queued"
 
 
 def _normalize_iso_utc(value: str) -> str:
@@ -1017,6 +1022,17 @@ def start_optimization(payload: StartOptimizationRequest):
     else:
         model_json_path.write_text("{}", encoding="utf-8")
 
+    run = create_run_internal(
+        workspace_id=model_id,
+        model_id=model_id,
+        version=version,
+        recipe_schema_path=str(schema_path),
+        model_json_path=str(model_json_path),
+        results_root=str(CASE_ROOT),
+        priority=100,
+        submitted_by="recipe-check",
+    )
+
     return StartOptimizationResponse(
         ok=True,
         model_id=model_id,
@@ -1025,5 +1041,8 @@ def start_optimization(payload: StartOptimizationRequest):
         recipe_json_dir=str(recipe_json_dir),
         schema_path=str(schema_path),
         model_json_path=str(model_json_path),
-        status="ready",
+        run_id=run["run_id"],
+        queue_position=int(run["queue_position"]),
+        results_dir=run["results_path"],
+        status=run["status"],
     )

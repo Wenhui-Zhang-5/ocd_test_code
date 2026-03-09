@@ -33,6 +33,17 @@ Path-related env vars:
 `POST /api/transfer/jobs`
 `GET /api/transfer/jobs/{job_id}`
 `GET /api/transfer/jobs/{job_id}/logs`
+`POST /api/optimization/runs`
+`GET /api/optimization/runs`
+`GET /api/optimization/runs/{run_id}`
+`POST /api/optimization/runs/{run_id}/pause`
+`POST /api/optimization/runs/{run_id}/resume`
+`POST /api/optimization/runs/{run_id}/cancel`
+`POST /api/optimization/runs/{run_id}/heartbeat`
+`POST /api/optimization/runs/{run_id}/artifacts`
+`GET /api/optimization/queue`
+`POST /api/optimization/queue/reorder`
+`GET /api/optimization/events/stream`
 `GET /api/spectrum/records`
 `POST /api/spectrum/load`
 

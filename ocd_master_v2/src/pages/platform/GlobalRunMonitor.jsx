@@ -1,12 +1,62 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { listGlobalRuns } from "../../data/mockApi.js";
+import { isOptimizationApiEnabled, listOptimizationRuns, subscribeOptimizationEvents } from "../../data/optimizationApi.js";
 import { buildHashHref } from "../../router.js";
 
 const tabs = ["all", "running", "queued", "completed"];
 
 export default function GlobalRunMonitor() {
   const [activeTab, setActiveTab] = useState("all");
-  const allRuns = listGlobalRuns();
+  const [apiRuns, setApiRuns] = useState([]);
+  const [apiError, setApiError] = useState("");
+  const optimizationApiEnabled = isOptimizationApiEnabled();
+
+  const loadApiRuns = async () => {
+    try {
+      const payload = await listOptimizationRuns({ page: 1, pageSize: 500 });
+      const mapped = Array.isArray(payload?.items)
+        ? payload.items.map((item) => ({
+            workspaceId: item.workspace_id || "-",
+            modelID: item.model_id || "-",
+            recipeName: "-",
+            owner: item.submitted_by || "-",
+            project: "-",
+            productId: "-",
+            version: item.version || "-",
+            status: String(item.status || "").toLowerCase() || "queued",
+            currentStage: item.current_stage || "-",
+            bestKPI: item.best_kpi === null || item.best_kpi === undefined ? "-" : String(item.best_kpi)
+          }))
+        : [];
+      setApiRuns(mapped);
+      setApiError("");
+    } catch (error) {
+      setApiError(error?.message || "Failed to load optimization runs");
+    }
+  };
+
+  useEffect(() => {
+    if (!optimizationApiEnabled) return undefined;
+    let active = true;
+    void loadApiRuns();
+    const unsubscribe = subscribeOptimizationEvents({
+      onEvent: () => {
+        if (!active) return;
+        void loadApiRuns();
+      },
+      onError: () => {
+        if (!active) return;
+        void loadApiRuns();
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [optimizationApiEnabled]);
+
+  const useMockFallback = !optimizationApiEnabled || (!!apiError && apiRuns.length === 0);
+  const allRuns = useMockFallback ? listGlobalRuns() : apiRuns;
   const runs = allRuns.filter((run) => (activeTab === "all" ? true : run.status === activeTab));
   const counts = useMemo(() => {
     const byStatus = { running: 0, queued: 0, completed: 0 };
@@ -67,6 +117,7 @@ export default function GlobalRunMonitor() {
             ))}
           </div>
         </div>
+        {optimizationApiEnabled && apiError ? <div className="panel-note">{apiError}</div> : null}
         <div className="table">
           <div className="table-row table-head">
             <span>Workspace</span>

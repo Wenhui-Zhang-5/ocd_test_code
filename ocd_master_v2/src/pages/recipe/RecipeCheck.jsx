@@ -130,7 +130,9 @@ export default function RecipeCheck({ workspaceId }) {
         const detail = payload?.detail || payload?.error || "Start optimization failed";
         throw new Error(typeof detail === "string" ? detail : "Start optimization failed");
       }
-      setStartStatus(`Ready. Saved to ${payload.recipe_json_dir || "-"}`);
+      setStartStatus(
+        `Queued: ${payload.run_id || "-"} (position ${payload.queue_position ?? "-"}) · schema: ${payload.recipe_json_dir || "-"}`
+      );
       setStartError("");
       saveRecipeSchema(workspaceId, {
         recipeCheck: {
