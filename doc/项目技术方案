@@ -1,0 +1,1122 @@
+# THKmaster 项目技术方案
+
+## 1 项目背景
+
+在先进制程中，光学量测（Optical Critical Dimension, OCD）是重要的结构参数量测技术。  
+OCD通过分析结构的反射光谱信息，反演出纳米级结构参数，例如：
+
+- Critical Dimension (CD)
+- Film Thickness (TK)
+- Sidewall Angle
+- 材料光学常数 (n, k)
+
+其基本思想是：
+
+结构参数 + 材料模型 → 光学仿真 → 模拟光谱 → 与测量光谱进行拟合 → 反演结构参数
+
+在工业实践中，OCD Recipe 的建立过程高度依赖工程师经验。工程师通常需要：
+
+1. 选择结构模型
+2. 设置材料模型
+3. 设置参数初值
+4. 选择优化参数
+5. 通过多轮拟合调整参数
+
+该过程通常需要较长时间，并且高度依赖工程经验。
+
+---
+
+## 2 项目目标
+
+本项目目标是实现 **Recipe 自动生成（Auto Recipe Generation）**，通过算法自动完成：
+
+- 参数搜索
+- 模型拟合
+- Recipe 建立
+
+从而降低工程经验依赖，并显著提升 Recipe 建立效率。
+
+由于当前厂商资源限制，无法直接在 OCD 平台进行算法开发，因此项目首先在 **THK（Thickness Measurement）平台**进行验证。
+
+THK 与 OCD 在光学测量原理上具有高度相似性，包括：
+
+- 基于光谱的结构反演
+- 光学仿真计算
+- 参数拟合流程
+
+因此建立验证平台：
+
+**THKmaster**
+
+用于验证自动 Recipe 生成算法。
+
+---
+
+## 3 问题数学建模
+
+OCD / THK 的参数反演问题可以形式化为：
+
+θ* = argmin ||S_meas - S_sim(θ)||²
+
+其中：
+
+θ 表示结构参数，例如：
+
+- CD
+- Thickness
+- Material parameters
+- Sidewall angle
+
+S_sim(θ) 表示通过光学仿真得到的模拟光谱。
+
+S_meas 表示设备测量光谱。
+
+本质上，该问题属于 **非线性最小二乘优化问题**。
+
+---
+
+## 4 问题挑战
+
+### 4.1 高维参数空间
+
+实际模型参数数量通常在：
+
+10–20 个参数。
+
+如果直接进行全局搜索，计算复杂度会快速增长。
+
+---
+
+### 4.2 非凸优化问题
+
+目标函数通常具有多个局部最优解。
+
+不同参数组合可能产生相似光谱，从而导致优化陷入局部最优。
+
+---
+
+### 4.3 参数耦合
+
+多个参数之间存在较强耦合关系，例如：
+
+- Thickness 与 Material n,k
+- CD 与 Sidewall angle
+
+这些参数变化可能产生相似光谱响应。
+
+---
+
+### 4.4 光学仿真计算成本高
+
+每一次光谱仿真通常需要：
+
+100ms ~ 数秒
+
+因此优化算法需要尽量减少仿真次数。
+
+---
+
+### 4.5 RCWA引擎不可访问
+
+由于厂商限制，系统无法访问 RCWA 引擎内部计算过程。
+
+系统仅能通过厂商提供的接口：
+
+参数 → 光谱
+
+获取模拟光谱。
+
+因此该问题属于：
+
+**Black-box optimization problem**
+
+---
+
+## 5 总体解决方案
+
+THKmaster 采用一种 **Global + Local Hybrid Optimization Framework**：
+
+Material Library  
+↓  
+Bayesian Optimization（Material + CD）  
+↓  
+LM Progressive Optimization  
+↓  
+Best Recipe
+
+其中：
+
+- Bayesian Optimization 负责全局搜索
+- LM 负责高精度局部拟合
+
+---
+
+## 6 Bayesian Optimization 设计
+
+Bayesian Optimization 用于全局探索参数空间。
+
+但为了降低搜索维度，BO 只优化：
+
+- Material
+- CD
+
+原因是：
+
+Material 与 CD 对光谱变化影响最大。
+
+通过限制 BO 搜索空间，可以：
+
+- 降低搜索维度
+- 提高搜索效率
+- 减少仿真次数
+
+BO 输出多个候选解，作为 LM 的初始点。
+
+---
+
+## 7 LM Progressive Optimization
+
+LM 用于局部精细拟合。
+
+但 LM 优化过程中并不会一次放开所有参数，而是采用：
+
+**Progressive Parameter Release**
+
+即逐步释放参数。
+
+例如：
+
+Stage 1  
+优化 CD
+
+Stage 2  
+优化 CD + Thickness
+
+Stage 3  
+优化 CD + Thickness + Material
+
+Stage 4  
+优化全部参数
+
+---
+
+## 8 为什么需要 Progressive Optimization
+
+### 8.1 参数可辨识度问题
+
+不同参数对光谱敏感度不同。
+
+例如：
+
+CD 对光谱变化影响最大，而某些几何参数影响较小。
+
+如果一次放开所有参数，优化过程容易被低敏感度参数干扰。
+
+---
+
+### 8.2 参数耦合问题
+
+某些参数组合可能产生类似光谱，例如：
+
+Thickness 增大  
+Material n 减小
+
+可能产生类似光谱响应。
+
+如果一次优化所有参数，优化器可能在错误方向更新。
+
+---
+
+### 8.3 优化稳定性问题
+
+LM 的更新依赖 Jacobian 矩阵。
+
+如果参数维度过高，Jacobian 矩阵可能变得 ill-conditioned，从而导致：
+
+- 收敛速度变慢
+- 优化震荡
+- 优化失败
+
+Progressive Optimization 可以逐步增加参数维度，从而提高优化稳定性。
+
+---
+
+## 9 梯度计算方法
+
+由于 RCWA 引擎不可访问，系统无法计算解析梯度。
+
+因此采用 **数值微分（Finite Difference）** 计算 Jacobian：
+
+∂f/∂x ≈ (f(x + Δ) - f(x)) / Δ
+
+该方法虽然会增加计算成本，但在当前条件下是可行方案。
+
+---
+
+## 10 THKmaster 系统流程
+
+整体流程如下：
+
+Material Library  
+↓  
+Bayesian Optimization  
+↓  
+Candidate Points  
+↓  
+LM Progressive Optimization  
+↓  
+Spectrum Simulation API  
+↓  
+Fitting Evaluation  
+↓  
+Best Recipe
+
+---
+
+## 11 项目成果
+
+THKmaster 实现了：
+
+- 自动参数搜索
+- 多初始点优化
+- 全局 + 局部优化框架
+- 参数自动调度
+
+相比传统人工 Recipe 建立方式：
+
+Recipe 建立时间从 **小时级降低到分钟级**。
+
+同时提高了 Recipe 生成的稳定性和可重复性。
+
+该系统为后续 **OCDmaster 自动 Recipe 生成系统**奠定了算法基础。
+
+
+
+# THKmaster 项目技术方案分享
+
+---
+
+# 1 从工程经验问题到数学优化问题
+
+## OCD Recipe 建立的传统方式
+
+在传统 OCD Recipe 建立过程中，工程师通常需要：
+
+- 选择结构模型
+- 设置材料模型
+- 设定参数初值
+- 选择优化参数
+- 多轮光谱拟合
+
+该过程通常：
+
+- 高度依赖工程经验
+- 建立周期较长
+- 不同工程师结果可能不同
+
+---
+
+## 从数学角度重新定义问题
+
+OCD Recipe 建立本质上可以表示为一个参数反演问题：
+
+θ* = argmin ||S_meas - S_sim(θ)||²
+
+其中：
+
+- θ：结构参数（CD、Thickness、Material 等）
+- S_sim：通过光学仿真计算得到的模拟光谱
+- S_meas：设备测量光谱
+
+---
+
+## 本质问题
+
+这是一个 **高维黑盒优化问题**
+
+---
+
+### 演讲提示
+
+强调一点：
+
+传统上这是一个工程经验问题，但从算法角度来看，其本质是一个高维优化问题。
+
+---
+
+# 2 OCD Recipe 自动化的核心挑战
+
+## 挑战一：高维参数空间
+
+实际模型参数通常达到：
+
+10 – 20 个参数
+
+例如：
+
+- CD
+- Thickness
+- Material n,k
+- Sidewall angle
+
+如果直接进行全局搜索：
+
+计算复杂度非常高。
+
+---
+
+## 挑战二：参数耦合
+
+不同参数组合可能产生相似光谱。
+
+例如：
+
+- Thickness 增加
+- Material n 减小
+
+可能产生类似光谱响应。
+
+因此存在：
+
+多解问题（ill-posed problem）。
+
+---
+
+## 挑战三：光学仿真计算昂贵
+
+每次光谱仿真通常需要：
+
+100ms – 秒级
+
+因此优化算法需要尽量减少仿真次数。
+
+---
+
+### 演讲提示
+
+总结一句：
+
+传统单纯依赖 LM 的局部优化方法，很容易陷入局部最优。
+
+---
+
+# 3 解决方案总体框架
+
+## Global + Local Hybrid Optimization
+
+为了同时解决：
+
+- 全局搜索
+- 局部精细拟合
+
+我们设计了一种：
+
+Global + Local Hybrid Optimization 框架。
+
+---
+
+## 整体流程
+
+Material Library  
+↓  
+Bayesian Optimization  
+↓  
+LM Optimization  
+↓  
+Best Recipe
+
+---
+
+## 思路
+
+- Global search：探索参数空间
+- Local optimization：精细拟合光谱
+
+---
+
+### 演讲提示
+
+这里强调：
+
+我们并没有完全依赖 AI，而是结合了物理模型与优化算法。
+
+---
+
+# 4 Bayesian Optimization 设计
+
+## 全局搜索策略
+
+Bayesian Optimization 用于探索参数空间。
+
+但为了降低搜索复杂度，我们对搜索空间进行了限制。
+
+BO 只优化两个参数：
+
+- Material
+- CD
+
+---
+
+## 为什么只优化这两个参数？
+
+原因是：
+
+Material 与 CD 对光谱变化影响最大。
+
+通过限制搜索空间：
+
+可以：
+
+- 降低维度
+- 提高搜索效率
+- 减少仿真次数
+
+---
+
+## BO 的输出
+
+Bayesian Optimization 会生成：
+
+多个候选解
+
+这些候选解将作为后续 LM 优化的初始点。
+
+---
+
+### 演讲提示
+
+强调一句：
+
+BO 的作用不是直接得到最终解，而是找到好的初始解。
+
+---
+
+# 5 Progressive LM Optimization
+
+## 局部精细优化
+
+在得到 BO 初始解之后，我们使用：
+
+Levenberg-Marquardt (LM)
+
+进行局部优化。
+
+---
+
+## Progressive Parameter Release
+
+LM 优化过程中不会一次放开所有参数，而是逐步释放参数。
+
+优化过程如下：
+
+Stage 1  
+优化 CD
+
+Stage 2  
+优化 CD + Thickness
+
+Stage 3  
+优化 CD + Thickness + Material
+
+Stage 4  
+优化全部参数
+
+---
+
+## 为什么要 Progressive？
+
+原因包括：
+
+1. 参数可辨识度问题  
+2. 参数耦合问题  
+3. 优化稳定性问题
+
+通过逐步增加参数维度，可以显著提高优化稳定性。
+
+---
+
+### 演讲提示
+
+强调：
+
+这一步实际上是在模拟工程师手动调参的过程。
+
+---
+
+# 6 THKmaster 自动Recipe生成流程
+
+## 系统整体流程
+
+Material Library  
+↓  
+Bayesian Optimization  
+↓  
+Candidate Points  
+↓  
+LM Progressive Optimization  
+↓  
+Spectrum Simulation API  
+↓  
+Fitting Evaluation  
+↓  
+Best Recipe
+
+---
+
+## 系统特点
+
+- 自动参数搜索
+- 全局 + 局部优化结合
+- 参数自动调度
+
+---
+
+### 演讲提示
+
+可以说一句：
+
+我们将工程师的经验流程转化为了算法流程。
+
+---
+
+# 7 Pilot 验证结果
+
+## Recipe 生成效率对比
+
+| 方法 | Recipe 建立时间 |
+|-----|----------------|
+| 人工方式 | 数小时 |
+| THKmaster | 数分钟 |
+
+---
+
+## 结果总结
+
+THKmaster 实现了：
+
+- Recipe 自动生成
+- 优化效率显著提升
+- 拟合质量与人工方法相当
+
+---
+
+## 项目意义
+
+THKmaster 作为 OCDmaster 的验证平台，为后续 OCD 自动 Recipe 生成系统奠定了技术基础。
+
+---
+
+### 演讲提示
+
+最后可以强调：
+
+该方法实现了 **物理建模 + 优化算法 + 工程经验** 的结合。
+
+
+
+# OCD Master 项目说明文档
+(OCD Recipe Automation Project)
+
+---
+
+# 1 项目背景与技术路径
+
+在半导体制造过程中，OCD（Optical Critical Dimension）建模用于通过光学光谱反演结构参数，例如：
+
+- CD（Critical Dimension）
+- Thickness
+- Profile 参数
+- 材料光学参数
+
+其核心过程是通过光谱拟合（Spectrum Fitting）完成结构反演。
+
+数学表达为：
+
+θ* = argmin ||S_meas − S_sim(θ)||²
+
+其中：
+
+θ 为结构参数  
+S_meas 为测量光谱  
+S_sim 为模拟光谱  
+
+这类问题属于典型的 **逆问题（Inverse Problem）**。
+
+在传统流程中，OCD Recipe 的建立高度依赖工程师经验，例如：
+
+- 如何选择模型结构
+- 如何选择材料组合
+- 哪些参数需要调整
+- 参数之间是否需要耦合
+- 哪些波段对关键参数更敏感
+
+整个过程往往需要多轮尝试，周期较长，并且不同工程师之间结果可能存在差异。
+
+因此，本项目的目标是：
+
+**将 OCD Recipe 建立流程从经验驱动转化为系统化、自动化的工程流程。**
+
+---
+
+# 2 技术路径：从 THK Master 到 OCD Master
+
+在项目初期，我们首先开发了 **THK Master** 作为算法验证平台。
+
+原因在于：
+
+THK 与 OCD 在光学建模原理上具有高度相似性，但复杂度明显更低。
+
+| 特性 | THK | OCD |
+|-----|-----|-----|
+模型复杂度 | 较低 | 较高 |
+参数数量 | 较少 | 较多 |
+光谱生成时间 | 较快 | 较慢 |
+工程复杂度 | 中等 | 较高 |
+
+由于 THK 的光谱生成速度较快，因此非常适合：
+
+- 验证优化方法
+- 测试自动化流程
+- 积累工程经验
+
+因此 THK Master 的核心作用是：
+
+**验证方法路径，并沉淀自动化建模经验。**
+
+而 OCD Master 则是在此基础上：
+
+**解决真实复杂工程问题。**
+
+---
+
+# 3 我们从 THK Master 学到了什么
+
+THK Master 的意义不仅是开发一个工具，更重要的是帮助我们建立了一套可复用的方法论。
+
+主要包括三个方面。
+
+---
+
+## 3.1 工程经验可以被结构化
+
+在传统建模流程中，工程师经验通常体现在：
+
+- 如何选择初始解
+- 哪些参数优先调整
+- 哪些参数不能同时放开
+- 如何判断当前模型是否合理
+- 哪些材料组合更可能有效
+
+这些经验过去往往是隐性的，依赖个人经验积累。
+
+THK Master 帮助我们认识到：
+
+**这些经验是可以被拆解为策略和规则的。**
+
+例如：
+
+| 工程经验 | 系统策略 |
+|---|---|
+先找到合理初始点 | Global Search |
+再做精细拟合 | Local Optimization |
+不要一次放开所有参数 | Progressive Optimization |
+尝试不同材料组合 | Material Library |
+
+这一步实际上完成了：
+
+**经验工程 → 算法工程 的转化。**
+
+---
+
+## 3.2 自动化的核心是“固化经验”
+
+THK Master 让我们意识到：
+
+自动化并不是简单地替代工程师，而是将工程师经验转化为系统策略。
+
+也就是说：
+
+系统并不是进行完全盲目的搜索，而是在工程经验的引导下进行优化。
+
+例如：
+
+- 不同材料组合的尝试
+- 参数释放顺序
+- 模型合理性判断
+
+这些都来源于工程师长期积累的经验。
+
+---
+
+## 3.3 混合优化框架是有效路径
+
+THK Master 验证了一个有效的优化框架：
+
+**Global Search + Local Optimization**
+
+具体实现为：
+
+Bayesian Optimization  
+↓  
+LM Optimization
+
+该框架解决了两个问题：
+
+### 避免局部最优
+
+LM 本质上是局部优化算法，如果初始点不好容易陷入局部最优。
+
+Bayesian Optimization 可以帮助找到更好的起点。
+
+---
+
+### 提高收敛效率
+
+BO 不需要精确拟合，只需要找到合理区域。
+
+随后 LM 可以快速完成精细拟合。
+
+---
+
+# 4 OCD Recipe 自动化的独特挑战
+
+相比 THK，OCD 的复杂度明显更高。
+
+主要体现在三个方面。
+
+---
+
+## 4.1 模型复杂度更高
+
+OCD 模型通常包含更多结构参数，例如：
+
+- CD
+- Thickness
+- Sidewall angle
+- Profile parameters
+- 材料参数
+
+参数数量可能达到：
+
+10–20 个甚至更多。
+
+这意味着：
+
+优化空间维度显著增加。
+
+---
+
+## 4.2 光学仿真成本更高
+
+OCD 光谱模拟通常基于：
+
+RCWA（Rigorous Coupled Wave Analysis）
+
+其计算成本远高于 THK。
+
+因此：
+
+优化算法必须尽量减少仿真次数。
+
+---
+
+## 4.3 光谱拟合与 KPI 并不完全一致
+
+在 OCD 建模中存在两个层面的指标：
+
+### 光谱拟合指标
+
+例如：
+
+- GOF
+- Residual
+- Correlation
+
+这些指标衡量的是：
+
+光谱相似程度。
+
+---
+
+### 工艺 KPI
+
+例如：
+
+- CD Linearity
+- Max Bias
+- Precision
+
+这些指标衡量的是：
+
+真实工艺测量能力。
+
+关键问题是：
+
+**光谱拟合好 ≠ KPI 表现好。**
+
+因此：
+
+系统不能仅仅优化 GOF。
+
+---
+
+# 5 OCD Master 的问题拆解
+
+为了应对上述挑战，我们将 OCD Recipe 自动化问题拆解为三个层面。
+
+---
+
+## 5.1 基础优化问题：光谱拟合
+
+首先，系统仍然围绕核心逆问题展开：
+
+θ* = argmin ||S_meas − S_sim(θ)||²
+
+即：
+
+通过光谱拟合寻找合理结构参数。
+
+这一点与 THK 相同。
+
+---
+
+## 5.2 工程约束：KPI 监控
+
+在光谱拟合过程中，系统会持续记录 KPI 表现，例如：
+
+- Linearity
+- Max Bias
+- Precision
+
+当 KPI 达到工程要求时：
+
+模型可以进入 release 候选。
+
+因此：
+
+KPI 作为工程 release 标准，而不是优化目标。
+
+---
+
+## 5.3 工程策略层
+
+为了保证模型合理性，系统引入了一系列工程策略。
+
+这些策略来源于工程师经验。
+
+---
+
+# 6 OCD Master 的工程策略
+
+系统实现了多种策略化机制。
+
+---
+
+## 6.1 Baseline 光谱选择
+
+系统首先选择一个 baseline 光谱作为拟合参考。
+
+后续优化过程围绕 baseline 进行。
+
+baseline 的质量会直接影响模型稳定性。
+
+---
+
+## 6.2 Library Search
+
+系统会尝试不同的材料组合或模型结构。
+
+目的在于：
+
+找到合理的模型起点。
+
+---
+
+## 6.3 Sensitivity 波段选择
+
+不同波长对不同参数的敏感度不同。
+
+系统会进行敏感度分析，并选择：
+
+对关键参数最敏感的波段进行拟合。
+
+这样可以提高参数识别能力。
+
+---
+
+## 6.4 参数耦合策略
+
+某些参数在物理上具有耦合关系。
+
+系统支持将这些参数作为组合进行优化。
+
+例如：
+
+多个结构参数需要同时变化。
+
+---
+
+## 6.5 CD 浮动策略
+
+在不同建模阶段，CD 参数可能：
+
+- 固定
+- 或允许浮动
+
+这一策略有助于：
+
+在稳定性与拟合精度之间取得平衡。
+
+---
+
+# 7 OCD Master 的整体流程
+
+系统整体流程如下：
+
+Baseline Spectrum Selection  
+↓  
+Library Search  
+↓  
+Spectrum Fitting  
+↓  
+Engineering Strategies  
+（Sensitivity / Coupling / Parameter Control）  
+↓  
+KPI Monitoring  
+↓  
+Candidate Model Generation  
+↓  
+Model Evaluation  
+↓  
+Recipe Release
+
+---
+
+# 8 项目价值总结
+
+OCD Master 实现了三个关键突破。
+
+---
+
+## 8.1 工程经验系统化
+
+将工程师经验转化为系统策略。
+
+---
+
+## 8.2 Recipe 自动化生成
+
+减少人工建模时间。
+
+---
+
+## 8.3 KPI 导向建模
+
+模型评价从单纯光谱拟合转向：
+
+真实工艺表现。
+
+---
+
+# 9 一句话总结
+
+OCD Master 的核心思想是：
+
+通过光谱拟合这一主优化问题，在优化过程中引入工程经验策略，并通过 KPI 持续监控模型表现，从而实现 OCD Recipe 的自动化生成。
+
+
+这套流程为 OCD Master 提供了：
+
+**完整的工程框架基础。**
+
+---
+
+# 二、OCD Recipe 自动化的独特挑战
+
+相比 THK，OCD 的问题复杂度明显更高。
+
+主要体现在三个方面。
+
+---
+
+## 1 模型复杂度更高
+
+OCD 的结构模型通常包含更多参数，例如：
+
+- CD
+- Thickness
+- Sidewall angle
+- Multiple material parameters
+- Profile parameters
+
+参数数量可能达到：
+
+**10–20 个甚至更多。**
+
+这带来的直接问题是：
+
+**优化空间维度迅速增加。**
+
+---
+
+## 2 光学计算成本更高
+
+OCD 的光谱模拟通常基于：
+
+**RCWA（Rigorous Coupled Wave Analysis）**
+
+其计算复杂度远高于 THK。
+
+这意味着：
+
+每一次光谱仿真成本更高。
+
+因此：
+
+**优化算法必须尽量减少仿真次数。**
+
+---
+
+## 3 KPI 与 fitting 指标不一致
+
+这是 OCD Master 中 **最核心的工程挑战**。
+
+在 OCD 建模中存在两个不同层面的指标。
+
+### fitting 指标
+
+例如：
+
+- GOF
+- Residual
+- Correlation
+
+这些指标衡量的是：
+
+**光谱拟合程度。**
+
+---
+
+### KPI 指标
+
+例如：
+
+- Linearity
+- Max Bias
+- Precision
+
+这些指标衡量的是：
+
+**真实工艺测量能力。**
+
+关键问题是：
+
+> **fitting 指标 与 KPI 并没有严格的数学映射关系。**
+
+因此：
+
+一个 GOF 很好的模型，未必有好的 CD 预测能力。
+
+这也是为什么 OCD Master 不能简单地：
+
+**最小化 GOF。**
