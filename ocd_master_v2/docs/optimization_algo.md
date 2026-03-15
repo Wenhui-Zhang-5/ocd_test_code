@@ -1,589 +1,290 @@
-这个文档的设计目标是：
-	•	直接给 Codex / AI coding agent
-	•	让它可以开始生成整个项目代码
-	•	所有模块职责明确
-	•	所有函数输入输出定义清晰
-	•	所有 pipeline 顺序明确
+# OCD Optimization Algorithm (Current Implementation)
 
+Last Updated: 2026-03-15
+Source of truth: `ocd_algorithm_api/ocd_auto_opt/pipeline/optimizer.py`
 
-⸻
+## 1. Scope
+
+This document describes the **implemented** optimization pipeline behavior (not an abstract design).  
+It covers:
+- path parsing
+- coupling/seed/fitting/precision/sensitivity/final regression
+- acceptance rules
+- persistence layout for frontend real-time reading
 
-Codex_Implementation_Prompt.md
+## 2. Key Rules Locked
 
-⸻
+- Primary key for a run context is still `model_id + version` case folder.
+- No-coupling case is supported by default.
+- Seed search uses **baseline spectrum only**.
+- Seed Top-K is selected by **GOF descending only**.
+- Precision pass rule is strict:
+  - `LBH == 0`
+  - every target CD meets its own precision threshold
+- Final regression stage:
+  - optimize baseline GOF step-by-step
+  - GOF drop guard: reject step if `new_gof < prev_gof * 0.9`
+  - KPI check starts only when `baseline_gof >= early_stop_gof` (default `0.99`)
+  - first KPI-passed snapshot for a grid is accepted immediately
+- Global early stop: stop all loops when valid solutions count reaches `top_n`.
 
-OCD Auto Optimization System
+## 3. Inputs and Path Resolution
 
-Codex Implementation Prompt
+Inputs:
+- `recipe_schema.json`
+- `model_json.json`
 
-You are implementing a Python system for automatic OCD model optimization.
+Resolved roots:
+- case root: `.../model_{model_id}/version_{version}`
+- data root: `.../data`
+- results root: `.../Results`
 
-The system interacts with an external HPC fitting engine and performs a structured optimization pipeline.
+Parsed spectrum path lists:
+- `baseline_spec_paths`:
+  - from `baselineWafer + baselineSpectrum`
+  - path: `data/fitting_wafer/{wafer}/{spec_type}/{filename}`
+- `regression_spec_paths`:
+  - from `tem.rows[]`
+  - path: `data/fitting_wafer/{wafer}/{spec_type}/{spectrum}`
+- `precision_spec_paths`:
+  - from `precision.selectedSpectra` (with worst/point filtering logic)
+  - path: `data/precision_wafer/repeat_{i}/{precision_spec_type}/{filename}`
 
-Your task is to implement the full optimization system following the specification below.
+Validation:
+- baseline path list must not be empty
+- precision path list must not be empty
 
-⸻
+## 4. Coupling Entry
 
-1. Programming Language
+`expressions = coupling_candidates(coupling_expressions(schema))`
 
-Use:
+Current behavior:
+- always includes a baseline branch `""`
+- then appends valid coupling expressions
 
-Python 3.10+
+So when no coupling is configured:
+- expressions = `[""]`
+- pipeline runs once using original `base_model_json`
 
-Required libraries:
+## 5. Stage A: Seed Search
 
-numpy
-pandas
-requests
-scipy
-sklearn
+Function: `search_material_seeds(...)`
 
-Optional:
+### 5.1 Candidate Material Source
 
-matplotlib (for debugging only)
+Per material (when floatable), seed files are read from case-local nk library only:
+- `model_{id}/version_{ver}/nk_library/{material_name}/*.json`
 
+### 5.2 Baseline Preprocess
 
-⸻
+- Load baseline csv
+- Normalize channels
+- Build wavelength grid from `model_json.content.proj_params.SEwavelength`
+- Interpolate baseline onto that grid (`baseline_interp`)
 
-2. Project Structure
+### 5.3 Per Candidate Evaluation
 
-Create the following project structure.
+For each material combination:
+1. apply material values to model
+2. set must-float CD flags
+3. run HPC fitting with baseline path only (`specPath=[baseline]`)
+4. sync vendor fields (`nominal/value` and `nominalNew/valueNew` consistency)
+5. call `getSpectrum` for simulated spectrum
+6. compare to baseline_interp and compute plain MSE
+7. record GOF/Residual/Correlation/LBH/MSE/score
 
-ocd_auto_opt/
+### 5.4 Ranking
 
-api/
-    run_hpc.py
-    get_spectrum.py
+- Top-K rule is `GOF` descending only.
 
-core/
-    coupling.py
-    seed_search.py
-    fitting.py
-    precision_check.py
-    sensitivity.py
-    regression.py
+### 5.5 Persisted Artifacts
 
-utils/
-    parse_hpc_result.py
-    spectrum_utils.py
-    model_utils.py
+Under `Results/seed_search/coupling_{xx}/`:
+- `meta.json`
+- `seed_XXX.json` (full candidate result + plot data + model snapshot)
+- `candidates.jsonl`
+- `latest.json`
+- `top_seeds.json`
 
-pipeline/
-    optimizer.py
+## 6. Stage B: Fitting (Baseline)
 
-data/
-    spectrum_data/
-    material_library/
+Function: `run_fitting(...)`
 
+Input model: top seeds from Stage A.
 
-⸻
+Execution order:
+- `iteration -> material_order -> executionStepsByMaterial[material]`
 
-3. External APIs
+Rules:
+- only `mustFloat` CDs float
+- step accepted only if `new_gof > best_gof`
+- else rollback (do not update current model)
+- early stop when `best_gof >= early_stop_gof`
 
-⸻
+Persisted artifacts:
+- `Results/fitting/coupling_{xx}/{seed_id}.events.jsonl`
+- `Results/fitting/coupling_{xx}/{seed_id}.latest.json`
+- `Results/fitting/coupling_{xx}/{seed_id}.summary.json`
 
-3.1 runHPC API
+Each event/summary contains frontend-ready payloads:
+- `model_json`
+- `nk_snapshot`
+- `spectrum_fit` (measured/simulated/aligned/mse)
 
-Endpoint:
+## 7. Stage C: Precision Check
 
-POST {base_url}/get_result/{model_id}
+Function: `precision_check(...)`
 
+### 7.1 Cases
 
-⸻
+1. Baseline case: all non-mustFix CDs float
+2. If baseline fails, run 1D fixed-maybe cases
+3. Only if no 1D pass, run 2D fixed-maybe pairs
 
-Request JSON
+### 7.2 Pass Rule
 
-{
-  "model_json": {...},
-  "server": "HPC",
-  "specPath": [list of spectrum paths],
-  "num_of_node": [node list]
-}
+A case passes only if:
+- `LBH == 0`
+- for each target CD: `precision_3sigma(cd) <= threshold(cd)`
 
+### 7.3 Outputs
 
-⸻
+- `selected_case`
+- `grid_fix_cds` (from selected fixed set)
+- baseline/1D/2D summary tables
 
-Response Structure
+Persisted artifact:
+- `Results/precision/coupling_{xx}/{seed_id}.summary.json`
 
-The response contains:
+## 8. Stage D: Sensitivity
 
-result['mat']
-result['data']
+Function: `sensitivity_analysis(...)`
 
+Inputs:
+- fitted model
+- target CDs (from precision baseline case)
 
-⸻
+Process:
+- generate baseline simulated spectrum
+- for each target CD, create `-delta` and `+delta` model
+- simulate minus/plus curves
+- align baseline/minus/plus on common wavelength/channel
+- compute per-CD sensitivity curves and aggregate total sensitivity
+- generate interval weights
 
-result[‘mat’]
+Persisted artifacts:
+- `Results/sensitivity/coupling_{xx}/{seed_id}.json`
+- `Results/sensitivity/coupling_{xx}/{seed_id}.events.jsonl`
+- `Results/sensitivity/coupling_{xx}/{seed_id}.latest.json`
 
-list of optimized model_json
+Stored fields include:
+- baseline curve
+- baseline vs plus/minus per-CD curves
+- total sensitivity
+- interval weights
 
-Each item corresponds to one spectrum.
+## 9. Stage E: Final Regression Optimization
 
-⸻
+Core function (independent module):
+- `core/final_regression.py::run_final_regression_stage_for_grid`
 
-result[‘data’]
+Called from optimizer for each grid combination.
 
-records = result['data']
+### 9.1 Grid Loop
 
-Structure:
+For each `grid_combo`:
+1. apply fixed grid CD values to fitted model
+2. run final regression stage with step events persisted
 
-records[0] = headers
-records[1:] = records_data
+### 9.2 Iterative Step Rule
 
+Inside final stage (`iteration -> material -> step`):
+1. run baseline fitting once for this step
+2. guard baseline GOF:
+   - reject if `new_gof < prev_gof * 0.9`
+3. if accepted, update current model
+4. only when `current_gof >= early_stop_gof`, run KPI evaluator
 
-⸻
+### 9.3 KPI Evaluator (per accepted step after GOF gate)
 
-headers include
+Includes both:
+- TM regression check (R2/slope/side-by-side for each target CD)
+- precision re-check on precision spectra (LBH + per-target 3sigma)
 
-all basis CD values
-GOF
-Correlation
-Residual
-LBH
+Pass condition:
+- regression passed for all target CDs
+- precision passed (LBH=0 and every target within threshold)
 
-Example:
+If passed:
+- return immediately as accepted grid result (no need to finish remaining steps)
 
-["CD_TOP","CD_BOTTOM","GOF","Correlation","Residual","LBH"]
+If no pass after all steps/iterations:
+- grid result rejected
 
+### 9.4 Persisted Artifacts
 
-⸻
+Per grid:
+- `Results/final_regression/coupling_{xx}/{seed_id}/grid_{idx}.events.jsonl`
+- `Results/final_regression/coupling_{xx}/{seed_id}/grid_{idx}.latest.json`
+- `Results/final_regression/coupling_{xx}/{seed_id}/grid_{idx}.summary.json`
 
-records_data
+Event payload includes:
+- `kind`: init/step/kpi_check/completed
+- model snapshots
+- NK snapshots
+- spectrum fit snapshots
 
-Each row corresponds to one fitted spectrum.
+## 10. Solution Collection and Global Stop
 
-Example:
+When a grid is accepted:
+- append one `OptimizationSolution`
 
-[34.1,29.5,0.995,0.998,0.002,0]
+Solution payload includes:
+- final `model_json`
+- `grid_fix_values`
+- regression metrics
+- precision metrics (per-target map retained)
+- sensitivity data references
 
-You must parse:
+Global stop:
+- if `len(valid_solution_list) >= top_n`, pipeline exits immediately
 
-GOF
-Residual
-Correlation
-LBH
-basis CD values
+Final output:
+- `Results/optimization_result.json`
 
+## 11. External API Contracts
 
-⸻
+### 11.1 get_result
 
-3.2 getSpectrum API
+`POST {base_url}/get_result/{model_id}`
 
-Endpoint:
+Request keys used:
+- `model_json`
+- `server` (default `HPC`)
+- `specPath`
+- `num_of_node`
 
-POST {base_url}/getSpectrum/{model_id}
+### 11.2 getSpectrum
 
+`POST {base_url}/getSpectrum/{model_id}`
 
-⸻
+Request keys used:
+- `model_json`
+- `server` (default `HPC`)
 
-Response
+Response parsed as CSV text.
 
-Text spectrum.
+## 12. Mock API for Integration Testing
 
-Load using:
+Router:
+- `ocd_algorithm_api/routers/mock_hpc.py`
 
-pd.read_csv(StringIO(result.text))
+Endpoints:
+- `POST /get_result/{model_id}`
+- `POST /getSpectrum/{model_id}`
 
+Switch:
+- `OCD_ENABLE_HPC_MOCK=1` (default enabled)
 
-⸻
-
-4. Spectrum Channel Types
-
-The spectrum channel format depends on spec_type provided by the frontend.
-
-Your code must handle different channel configurations.
-
-⸻
-
-SE
-
-If:
-
-spec_type = "SE"
-
-Spectrum channels:
-
-N
-C
-S
-
-Data format:
-
-wavelengths | N | C | S
-
-
-⸻
-
-SR
-
-If:
-
-spec_type = "SR"
-
-Channels:
-
-TE
-TM
-
-Data format:
-
-wavelengths | TE | TM
-
-
-⸻
-
-Combine
-
-If:
-
-spec_type = "Combine"
-
-Channels:
-
-5 channels
-
-Example:
-
-wavelengths | ch1 | ch2 | ch3 | ch4 | ch5
-
-Your implementation must not assume channel names.
-
-Instead:
-
-all columns except "wavelengths"
-are spectral channels
-
-
-⸻
-
-5. Optimization Pipeline
-
-The optimizer must execute the following pipeline.
-
-Coupling Generation
-        ↓
-Seed Searching
-        ↓
-Spectrum Fitting
-        ↓
-Precision Check
-        ↓
-Sensitivity Analysis
-        ↓
-Final Regression Optimization
-
-
-⸻
-
-6. Coupling Module
-
-File:
-
-core/coupling.py
-
-Function:
-
-apply_coupling(model_json, coupling_expression)
-
-Responsibilities:
-	•	modify model_json
-	•	move coupled parameters into constraint
-	•	remove redundant basis parameters
-
-⸻
-
-7. Seed Searching Module
-
-File:
-
-core/seed_search.py
-
-Goal:
-
-find best material parameter combinations
-
-Procedure:
-	1.	load baseline spectrum
-	2.	replace material parameters using library
-	3.	float only mustFloat CDs
-	4.	run HPC fitting
-	5.	evaluate GOF or residual
-
-Return:
-
-topK seeds
-
-
-⸻
-
-8. Spectrum Fitting Module
-
-File:
-
-core/fitting.py
-
-Optimization order:
-
-materialOrder
-↓
-parameter steps
-
-Acceptance rule:
-
-if GOF improves → accept
-else revert
-
-Early stop:
-
-GOF ≥ 0.99
-
-
-⸻
-
-9. Precision Check Module
-
-File:
-
-core/precision_check.py
-
-Goal:
-
-determine gridFix CDs
-
-Procedure:
-
-baseline case
-1D fix test
-2D fix test
-
-Metrics:
-
-LBH
-precision = 3σ
-
-Output:
-
-gridFix CD list
-
-
-⸻
-
-10. Sensitivity Analysis Module
-
-File:
-
-core/sensitivity.py
-
-Procedure:
-	1.	simulate baseline spectrum
-	2.	simulate CD +10nm
-	3.	simulate CD -10nm
-
-Compute sensitivity:
-
-|baseline − minus|
-
-
-⸻
-
-Channel Processing
-
-For each wavelength:
-
-sensitivity = mean(abs(channel differences))
-
-Use all channels dynamically.
-
-⸻
-
-Multiple Target CDs
-
-If multiple CDs exist:
-
-S_total(λ) = sum(S_cd(λ))
-
-
-⸻
-
-Interval Aggregation
-
-Aggregate sensitivity by intervals.
-
-Example:
-
-190–200
-200–210
-
-Compute mean sensitivity per interval.
-
-⸻
-
-Weight Mapping
-
-Normalize sensitivity into:
-
-0.5 → 3.0
-
-Output format:
-
-[min,max,step,weight]
-
-Example:
-
-[190,200,1,0.8]
-
-
-⸻
-
-11. Final Regression Optimization
-
-File:
-
-core/regression.py
-
-Search structure:
-
-Coupling
-  ↓
-Seed
-  ↓
-GridFix Combination
-  ↓
-Fitting iteration
-
-
-⸻
-
-12. Baseline GOF Protection
-
-During regression stage:
-
-baseline_gof_new ≥ baseline_gof_prev × 0.9
-
-Meaning:
-
-≤10% degradation allowed
-
-If exceeded:
-
-rollback iteration
-
-
-⸻
-
-13. Regression Metrics
-
-Compute regression:
-
-TM_CD → OCD_CD
-
-Metrics:
-
-R²
-Slope
-Side-by-side
-
-
-⸻
-
-14. Precision Evaluation
-
-Using precision spectra.
-
-Procedure:
-
-repeat fitting
-compute CD distribution
-precision = 3σ
-
-
-⸻
-
-15. KPI Conditions
-
-Valid solution must satisfy:
-
-R² ≥ threshold
-Slope within range
-Side-by-side ≤ limit
-Precision ≤ limit
-
-
-⸻
-
-16. Early Stop Strategy
-
-Global stopping rule:
-
-stop when TopN solutions found
-
-Example:
-
-TopN = 5
-
-
-⸻
-
-17. Main Pipeline
-
-File:
-
-pipeline/optimizer.py
-
-Main loop pseudocode:
-
-for coupling in couplings:
-
-    model = apply_coupling(base_model)
-
-    seeds = search_material_seeds(model)
-
-    for seed in seeds:
-
-        fitted_model = run_fitting(seed)
-
-        gridFixCD = precision_check(fitted_model)
-
-        sensitivity_weights = sensitivity_analysis(fitted_model)
-
-        for grid_combo in enumerate_grid(gridFixCD):
-
-            model = apply_grid(grid_combo)
-
-            optimized_model = iterative_fit(model)
-
-            if baseline_gof_drop > 10%:
-                revert()
-
-            regression_metrics = compute_regression()
-
-            precision = compute_precision()
-
-            if KPI_satisfied:
-                save_solution()
-
-                if solution_count >= TopN:
-                    stop()
-
-
-⸻
-
-18. Expected Output
-
-The system should return:
-
-valid_solution_list
-
-Each solution contains:
-
-model_json
-gridFix values
-regression metrics
-precision metrics
-spectrum data
-
-
-⸻
-
-End of Codex Prompt
-
+Purpose:
+- validate pipeline flow and frontend rendering without real vendor engine.
