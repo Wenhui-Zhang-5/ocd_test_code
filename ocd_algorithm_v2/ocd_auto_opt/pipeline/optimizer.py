@@ -820,7 +820,7 @@ class OCDOptimizer:
             "regression": [],
         }
 
-        for coupling_idx, expression in enumerate(expressions, start=1):
+        for coupling_idx, expression in enumerate(expressions, start=0):
             coupled_model = apply_coupling(base_model, expression)
             self._emit("coupling", {"index": coupling_idx, "total": len(expressions), "expression": expression})
 
